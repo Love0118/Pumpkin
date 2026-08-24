@@ -4792,15 +4792,9 @@ impl World {
     }
 
     pub fn spawn_entity_non_save(&self, entity: &Arc<dyn EntityBase>) {
-        let _base_entity = entity.get_entity();
-        self.broadcast_entity_spawn(entity);
-        self.spawn_state.load().add_entity(self, entity.as_ref());
-
-        self.entities.rcu(|current_entities| {
-            let mut new_entities = (**current_entities).clone();
-            new_entities.push(entity.clone());
-            new_entities
-        });
+        if self.add_entity_silent(entity) {
+            self.broadcast_entity_spawn(entity);
+        }
     }
 
     pub async fn spawn_entity(self: &Arc<Self>, entity: Arc<dyn EntityBase>) {
@@ -4817,9 +4811,12 @@ impl World {
             return;
         }
 
+        if !self.add_entity_silent(&entity) {
+            return;
+        }
+
         self.broadcast_entity_spawn(&entity);
         entity.init_data_tracker().await;
-        self.add_entity_silent(entity).await;
     }
 
     pub fn broadcast_entity_spawn(&self, entity: &Arc<dyn EntityBase>) {
@@ -4837,8 +4834,9 @@ impl World {
         }
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn add_entity_silent(&self, entity: Arc<dyn EntityBase>) {
+    /// Publishes a live entity in the server lookup. Callers must only broadcast the
+    /// entity after this returns `true`, so a client-visible ID is immediately resolvable.
+    pub fn add_entity_silent(&self, entity: &Arc<dyn EntityBase>) -> bool {
         let base_entity = entity.get_entity();
 
         // Guard against duplicate entities with the same UUID.
@@ -4850,7 +4848,7 @@ impl World {
             .iter()
             .any(|e| e.get_entity().entity_uuid == base_entity.entity_uuid);
         if already_exists {
-            return;
+            return false;
         }
 
         // The entity stays live-only: it is written to its chunk's saved data on
@@ -4863,6 +4861,8 @@ impl World {
             new_entities.push(entity.clone());
             new_entities
         });
+
+        true
     }
 
     #[allow(clippy::unused_async)]
@@ -7008,13 +7008,113 @@ impl WorldPortalExt for WorldPortal {
 
 #[cfg(test)]
 mod tests {
+    use arc_swap::ArcSwap;
+    use pumpkin_config::world::LevelConfig;
     use pumpkin_data::{
         Block,
         block_properties::{BlockProperties, ChestLikeProperties, ChestType, HorizontalFacing},
+        dimension::Dimension,
+        entity::EntityType,
     };
-    use pumpkin_util::math::position::BlockPos;
+    use pumpkin_util::{
+        math::{position::BlockPos, vector3::Vector3},
+        world_seed::Seed,
+    };
+    use pumpkin_world::{level::Level, world_info::LevelData};
+    use std::{
+        any::Any,
+        sync::{
+            Arc, Weak,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
+    use tempfile::TempDir;
 
-    use super::{bedrock_block_breaking_rate, bedrock_chest_block_actor};
+    use crate::{
+        block::registry::default_registry,
+        entity::{Entity, EntityBase, EntityBaseFuture, living::LivingEntity},
+    };
+
+    use super::{World, bedrock_block_breaking_rate, bedrock_chest_block_actor};
+
+    struct SpawnLifecycleProbe {
+        entity: Entity,
+        tracker_sync_calls: AtomicUsize,
+        registered_during_tracker_sync: AtomicBool,
+    }
+
+    impl SpawnLifecycleProbe {
+        fn new(world: Arc<World>) -> Self {
+            Self {
+                entity: Entity::new(world, Vector3::new(0.0, 64.0, 0.0), &EntityType::ITEM),
+                tracker_sync_calls: AtomicUsize::new(0),
+                registered_during_tracker_sync: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl EntityBase for SpawnLifecycleProbe {
+        fn get_entity(&self) -> &Entity {
+            &self.entity
+        }
+
+        fn get_living_entity(&self) -> Option<&LivingEntity> {
+            None
+        }
+
+        fn cast_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn init_data_tracker(&self) -> EntityBaseFuture<'_, ()> {
+            Box::pin(async move {
+                self.tracker_sync_calls.fetch_add(1, Ordering::Relaxed);
+                let world = self.entity.world.load();
+                self.registered_during_tracker_sync.store(
+                    world.get_entity_by_id(self.entity.entity_id).is_some(),
+                    Ordering::Relaxed,
+                );
+            })
+        }
+    }
+
+    fn spawn_test_world() -> (Arc<World>, TempDir) {
+        let temp_dir = TempDir::new().expect("the test world directory should be created");
+        let level = Level::from_root_folder(
+            &LevelConfig::default(),
+            temp_dir.path().to_path_buf(),
+            0,
+            Dimension::OVERWORLD,
+            None,
+        );
+        let level_info = Arc::new(ArcSwap::from_pointee(LevelData::default(Seed(0))));
+        let world = Arc::new(World::load(
+            level,
+            level_info,
+            Dimension::OVERWORLD,
+            default_registry(),
+            Weak::new(),
+        ));
+        (world, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn spawn_entity_registers_before_tracker_sync() {
+        let (world, _temp_dir) = spawn_test_world();
+        let probe = Arc::new(SpawnLifecycleProbe::new(world.clone()));
+        let entity_id = probe.entity.entity_id;
+
+        world.spawn_entity(probe.clone()).await;
+        world.spawn_entity(probe.clone()).await;
+
+        assert!(world.get_entity_by_id(entity_id).is_some());
+        assert_eq!(probe.tracker_sync_calls.load(Ordering::Relaxed), 1);
+        assert!(
+            probe.registered_during_tracker_sync.load(Ordering::Relaxed),
+            "tracker synchronization must not expose an unregistered entity ID"
+        );
+        world.level.shutdown().await;
+    }
 
     #[test]
     fn bedrock_block_breaking_rate_uses_progress_per_tick() {
