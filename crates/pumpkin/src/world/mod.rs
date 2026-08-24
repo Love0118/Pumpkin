@@ -947,6 +947,14 @@ impl World {
         Self::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
     }
 
+    fn mark_entity_tracked_except(&self, entity_id: i32, except: &[uuid::Uuid]) {
+        for player in self.players.load().iter() {
+            if !except.contains(&player.gameprofile.id) {
+                player.mark_entity_tracked(entity_id);
+            }
+        }
+    }
+
     /// Broadcasts the skin layers of a player, encoding the metadata for each Java client's own
     /// protocol version since the tracked data index differs between versions.
     fn broadcast_skin_parts_sync<B: BClientPacket>(
@@ -2908,6 +2916,7 @@ impl World {
             ),
             &bedrock_add_player,
         );
+        self.mark_entity_tracked_except(runtime_id as i32, &[gameprofile.id]);
 
         self.send_player_equipment(&player).await;
 
@@ -2990,6 +2999,7 @@ impl World {
             };
 
             client.send_packet(&ex_add_player).await;
+            player.mark_entity_tracked(existing_player.entity_id());
 
             let ex_held_item = existing_player.inventory().held_item().await;
 
@@ -3189,6 +3199,9 @@ impl World {
         if client.version.load() >= JavaMinecraftVersion::V_1_20_2 {
             client.send_packet(&CChunkBatchEnd::new(1u16)).await;
         }
+        player
+            .mark_chunks_sent(std::slice::from_ref(&center_chunk))
+            .await;
 
         let velocity = player.living_entity.entity.velocity.load();
 
@@ -3411,6 +3424,7 @@ impl World {
             &spawn_entity,
             &bedrock_add_player,
         );
+        self.mark_entity_tracked_except(entity_id, &[player.gameprofile.id]);
 
         // Broadcast metadata to Java players so they can correctly interact with the new player
         let skin_parts = player.config.load().skin_parts;
@@ -3552,6 +3566,7 @@ impl World {
                     &bedrock_add_player,
                 )
                 .await;
+            player.mark_entity_tracked(existing_player.entity_id());
 
             if client.version.load() >= CURRENT_MC_VERSION {
                 let config = existing_player.config.load();
@@ -4207,6 +4222,9 @@ impl World {
             if java_client.version.load() >= JavaMinecraftVersion::V_1_20_2 {
                 java_client.send_packet(&CChunkBatchEnd::new(1u16)).await;
             }
+            player
+                .mark_chunks_sent(std::slice::from_ref(&center_chunk))
+                .await;
         }
 
         // Send teleport packet after at least the center chunk was delivered
@@ -4291,7 +4309,7 @@ impl World {
 
                 let position = Vector2::new(chunk.x, chunk.z);
 
-                if !level.is_chunk_watched(&position) {
+                if !level.is_chunk_watched(&position) || !player.is_watching_chunk(position) {
                     // No longer watched: don't make its entities live. Leave the
                     // serialized data untouched so the normal unload path persists
                     // it as-is (nothing went live, so there is nothing to save).
@@ -4309,8 +4327,6 @@ impl World {
                     // a duplicate copy that would be re-appended on the next unload
                     // and doubled on every reload.
                     let entity_nbts = std::mem::take(&mut *chunk.data.lock().await);
-                    let mut entities_to_add: Vec<Arc<dyn EntityBase>> =
-                        Vec::with_capacity(entity_nbts.len());
                     for entity_nbt in &entity_nbts {
                         let Some(id) = entity_nbt.get_string("id") else {
                             debug!("Entity has no ID");
@@ -4331,25 +4347,40 @@ impl World {
                         let entity =
                             from_type(entity_type, Vector3::new(0.0, 0.0, 0.0), &world, uuid);
                         entity.read_nbt_non_mut(entity_nbt).await;
-                        entity.init_data_tracker().await;
 
                         let base_entity = entity.get_entity();
                         // Clear velocity so the client does not replay the drop
                         // animation; residual velocity from the original drop is
                         // stale data.
                         base_entity.velocity.store(Vector3::default());
+                        let entity_uuid = base_entity.entity_uuid;
 
-                        player.client.enqueue_spawn_packet(&entity).await;
-                        player.try_restore_vehicle(&entity).await;
-                        entities_to_add.push(entity);
-                    }
+                        // Register the entity before sending its spawn sequence so an
+                        // interaction arriving immediately after the pairing can
+                        // resolve the same ID from the world lookup.
+                        let added = world.add_entity_silent(entity.clone()).await;
+                        let live_entity = if added {
+                            Some(entity)
+                        } else {
+                            world
+                                .entities
+                                .load()
+                                .iter()
+                                .find(|live| live.get_entity().entity_uuid == entity_uuid)
+                                .cloned()
+                        };
 
-                    if !entities_to_add.is_empty() {
-                        world.entities.rcu(|current_entities| {
-                            let mut new_entities = (**current_entities).clone();
-                            new_entities.extend(entities_to_add.iter().cloned());
-                            new_entities
-                        });
+                        if let Some(live_entity) = live_entity {
+                            let sent = player.send_entity_spawn_if_tracked(&live_entity).await;
+                            if sent {
+                                player.try_restore_vehicle(&live_entity).await;
+                            }
+                            if added {
+                                // Initial tracker metadata must follow the spawn
+                                // sequence, never precede it.
+                                live_entity.init_data_tracker().await;
+                            }
+                        }
                     }
                 } else {
                     // The chunk's entities are already live (another watcher loaded
@@ -4358,7 +4389,7 @@ impl World {
                     for entity in world.entities.load().iter() {
                         let base_entity = entity.get_entity();
                         if base_entity.chunk_pos.load() == position {
-                            player.client.enqueue_spawn_packet(entity).await;
+                            player.send_entity_spawn_if_tracked(entity).await;
                             player.try_restore_vehicle(entity).await;
                         }
                     }
@@ -4778,8 +4809,6 @@ impl World {
     }
 
     pub fn spawn_entity_non_save(&self, entity: &Arc<dyn EntityBase>) {
-        let _base_entity = entity.get_entity();
-        self.broadcast_entity_spawn(entity);
         self.spawn_state.load().add_entity(self, entity.as_ref());
 
         self.entities.rcu(|current_entities| {
@@ -4787,6 +4816,11 @@ impl World {
             new_entities.push(entity.clone());
             new_entities
         });
+
+        // Register the entity before pairing it with clients. This mirrors
+        // vanilla's entity manager: inbound packets can resolve the ID as soon
+        // as the client receives the spawn sequence.
+        self.broadcast_entity_spawn(entity);
     }
 
     pub async fn spawn_entity(self: &Arc<Self>, entity: Arc<dyn EntityBase>) {
@@ -4803,40 +4837,63 @@ impl World {
             return;
         }
 
-        self.broadcast_entity_spawn(&entity);
-        entity.init_data_tracker().await;
-        self.add_entity_silent(entity).await;
+        if self.add_entity_silent(entity.clone()).await {
+            let players = self.players.load().iter().cloned().collect();
+            Self::send_entity_spawn_to_players(players, entity.clone()).await;
+            // Initial tracker metadata must follow the spawn sequence. Sending
+            // it before pairing leaves already-loaded clients with metadata for
+            // an entity they have not created yet.
+            entity.init_data_tracker().await;
+        }
     }
 
-    pub fn broadcast_entity_spawn(&self, entity: &Arc<dyn EntityBase>) {
-        let base_entity = entity.get_entity();
-        let chunk_pos = base_entity.chunk_pos.load();
-
-        let players = self.players.load();
-        for player in players.iter() {
+    async fn send_entity_spawn_to_players(players: Vec<Arc<Player>>, entity: Arc<dyn EntityBase>) {
+        let chunk_pos = entity.get_entity().chunk_pos.load();
+        for player in players {
             let center = player.get_entity().chunk_pos.load();
-            let view_distance = get_view_distance(player).get() as i32;
+            let view_distance = get_view_distance(&player).get() as i32;
 
             if is_within_view_distance(chunk_pos, center, view_distance) {
-                player.client.try_enqueue_spawn_packet(entity);
+                player.send_entity_spawn_if_tracked(&entity).await;
             }
         }
     }
 
+    pub fn broadcast_entity_spawn(&self, entity: &Arc<dyn EntityBase>) {
+        let Some(server) = self.server.upgrade() else {
+            return;
+        };
+
+        let players = self.players.load().iter().cloned().collect();
+        let entity = entity.clone();
+        server.spawn_task(async move {
+            Self::send_entity_spawn_to_players(players, entity).await;
+        });
+    }
+
     #[allow(clippy::unused_async)]
-    pub async fn add_entity_silent(&self, entity: Arc<dyn EntityBase>) {
+    pub async fn add_entity_silent(&self, entity: Arc<dyn EntityBase>) -> bool {
         let base_entity = entity.get_entity();
 
         // Guard against duplicate entities with the same UUID.
         // This can happen when chunk entity data is loaded while the entity
         // already exists in the world (e.g. another player is still tracking it).
-        let already_exists = self
-            .entities
-            .load()
-            .iter()
-            .any(|e| e.get_entity().entity_uuid == base_entity.entity_uuid);
-        if already_exists {
-            return;
+        let mut added = false;
+        self.entities.rcu(|current_entities| {
+            if current_entities
+                .iter()
+                .any(|e| e.get_entity().entity_uuid == base_entity.entity_uuid)
+            {
+                return (**current_entities).clone();
+            }
+
+            added = true;
+            let mut new_entities = (**current_entities).clone();
+            new_entities.push(entity.clone());
+            new_entities
+        });
+        if !added {
+            return false;
         }
 
         // The entity stays live-only: it is written to its chunk's saved data on
@@ -4844,11 +4901,7 @@ impl World {
         // serialized at once (which would double it on the next reload).
         self.spawn_state.load().add_entity(self, entity.as_ref());
 
-        self.entities.rcu(|current_entities| {
-            let mut new_entities = (**current_entities).clone();
-            new_entities.push(entity.clone());
-            new_entities
-        });
+        true
     }
 
     #[allow(clippy::unused_async)]
@@ -4864,6 +4917,9 @@ impl World {
         base_entity.removed.store(true, Ordering::Release);
 
         self.spawn_state.load().remove_entity(self, entity);
+        for player in self.players.load().iter() {
+            player.untrack_entity(base_entity.entity_id);
+        }
         self.entities.rcu(|current_entities| {
             let mut new_entities = (**current_entities).clone();
             new_entities.retain(|e| e.get_entity().entity_uuid != base_entity.entity_uuid);
@@ -4904,6 +4960,18 @@ impl World {
         });
 
         for entity in entities_to_remove {
+            let base_entity = entity.get_entity();
+            if base_entity
+                .removal_reason
+                .swap(Some(RemovalReason::UnloadedToChunk))
+                .is_some()
+            {
+                continue;
+            }
+            base_entity.removed.store(true, Ordering::Release);
+            for player in self.players.load().iter() {
+                player.untrack_entity(base_entity.entity_id);
+            }
             self.save_entity(&entity).await;
             self.spawn_state.load().remove_entity(self, entity.as_ref());
         }
@@ -6521,6 +6589,56 @@ impl World {
             Self::collect_java_recipients_by_version(java_recipients.into_iter());
         Self::broadcast_java_grouped(je_packet, recipients_by_version);
         Self::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
+    }
+
+    /// Sends an entity movement packet only to clients that have received the
+    /// entity's spawn pairing, while repairing pairings when an entity crosses
+    /// a client-tracking boundary.
+    pub fn broadcast_entity_movement_editioned_sync<J: ClientPacket, B: BClientPacket>(
+        &self,
+        entity_id: i32,
+        chunk_pos: Vector2<i32>,
+        je_packet: &J,
+        be_packet: &B,
+    ) {
+        let entity = self.get_entity_by_id(entity_id);
+        let server = self.server.upgrade();
+
+        for player in self.players.load().iter() {
+            if player.entity_id() == entity_id {
+                continue;
+            }
+            let visible = player.is_watching_chunk(chunk_pos);
+            let Some(chunk_tracked) = player.is_chunk_tracked_now(chunk_pos) else {
+                // The chunk manager is briefly updating its sent set. Leave the
+                // current pairing intact and let the next entity packet retry.
+                continue;
+            };
+
+            if player.is_entity_tracked(entity_id) {
+                if chunk_tracked {
+                    player
+                        .client
+                        .try_enqueue_packet_editioned(je_packet, be_packet);
+                    continue;
+                }
+
+                if player.untrack_entity(entity_id) {
+                    player.client.try_enqueue_packet_editioned(
+                        &CRemoveEntities::new(&[entity_id.into()]),
+                        &CRemoveActor::new(VarLong(entity_id as i64)),
+                    );
+                }
+            }
+
+            if visible && let (Some(server), Some(entity)) = (server.as_ref(), entity.as_ref()) {
+                let player = player.clone();
+                let entity = entity.clone();
+                server.spawn_task(async move {
+                    player.send_entity_spawn_if_tracked(&entity).await;
+                });
+            }
+        }
     }
 
     /// Broadcasts a packet to chunk watchers, excluding specific players.

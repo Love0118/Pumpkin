@@ -126,15 +126,8 @@ impl JavaClient {
                 PlayerInteractUnknownEntityEvent::new(player, entity_id.0, action);
 
                 'after: {
-                    if event.action == ActionType::Attack {
-                        error!(
-                            "Player id {} interacted with entity id {}, which was not found.",
-                            player.entity_id(),
-                            event.entity_id
-                        );
-                        self.kick(TextComponent::translate_cross(translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED, translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED, [],))
-                        .await;
-                    }
+                    // A stale client-side entity ID is expected while tracking
+                    // catches up with a chunk transition. Vanilla ignores it.
                 }
             }}
         }

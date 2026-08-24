@@ -1753,7 +1753,8 @@ impl Entity {
                 self.on_ground.load(Relaxed),
             );
             if self.entity_type == &EntityType::PLAYER {
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_entity_movement_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMovePlayer::new(
@@ -1780,7 +1781,8 @@ impl Entity {
                 if self.on_ground.load(Relaxed) {
                     flags |= MOVE_ACTOR_DELTA_FLAG_ON_GROUND;
                 }
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_entity_movement_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMoveActorDelta::new(
@@ -1802,7 +1804,8 @@ impl Entity {
                 self.on_ground.load(Relaxed),
             );
             if self.entity_type == &EntityType::PLAYER {
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_entity_movement_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMovePlayer::new(
@@ -1827,7 +1830,8 @@ impl Entity {
                     flags |= MOVE_ACTOR_DELTA_FLAG_ON_GROUND;
                 }
 
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_entity_movement_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMoveActorDelta::new(
@@ -1850,7 +1854,8 @@ impl Entity {
                 self.on_ground.load(Relaxed),
             );
             if self.entity_type == &EntityType::PLAYER {
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_entity_movement_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMovePlayer::new(
@@ -1874,7 +1879,8 @@ impl Entity {
                 if self.on_ground.load(Relaxed) {
                     flags |= MOVE_ACTOR_DELTA_FLAG_ON_GROUND;
                 }
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_entity_movement_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMoveActorDelta::new(
@@ -1948,7 +1954,8 @@ impl Entity {
         );
 
         if self.entity_type == &EntityType::PLAYER {
-            self.world.load().broadcast_to_chunk_editioned_sync(
+            self.world.load().broadcast_entity_movement_editioned_sync(
+                self.entity_id,
                 chunk_pos,
                 &je_packet,
                 &CMovePlayer::new(
@@ -1973,7 +1980,8 @@ impl Entity {
                 flags |= MOVE_ACTOR_DELTA_FLAG_ON_GROUND;
             }
 
-            self.world.load().broadcast_to_chunk_editioned_sync(
+            self.world.load().broadcast_entity_movement_editioned_sync(
+                self.entity_id,
                 chunk_pos,
                 &je_packet,
                 &CMoveActorDelta::new(
