@@ -216,7 +216,7 @@ impl World {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter_map(|(id, state)| receives_entity_packets(state).then_some(*id))
+            .filter_map(|(id, state)| receives_entity_packets(*state).then_some(*id))
             .collect();
         Some(viewers)
     }
@@ -234,8 +234,8 @@ fn chunk_key(chunk: Vector2<i32>) -> u64 {
     (u64::from(chunk.x as u32) << 32) | u64::from(chunk.y as u32)
 }
 
-fn receives_entity_packets(state: &PairingState) -> bool {
-    *state == PairingState::Paired
+fn receives_entity_packets(state: PairingState) -> bool {
+    state == PairingState::Paired
 }
 
 fn send_remove_entity(player: &Player, entity_id: i32) {
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn pending_pairing_is_not_an_entity_packet_recipient() {
-        assert!(!receives_entity_packets(&PairingState::Pending));
-        assert!(receives_entity_packets(&PairingState::Paired));
+        assert!(!receives_entity_packets(PairingState::Pending));
+        assert!(receives_entity_packets(PairingState::Paired));
     }
 }
