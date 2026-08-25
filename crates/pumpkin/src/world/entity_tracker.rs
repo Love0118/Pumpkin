@@ -12,10 +12,7 @@ use pumpkin_util::math::{get_section_cord, vector2::Vector2};
 use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
-use crate::{
-    entity::{EntityBase, player::Player},
-    net::ClientPlatform,
-};
+use crate::entity::{EntityBase, player::Player};
 
 use super::World;
 
@@ -242,14 +239,10 @@ fn receives_entity_packets(state: &PairingState) -> bool {
 }
 
 fn send_remove_entity(player: &Player, entity_id: i32) {
-    match player.client.as_ref() {
-        ClientPlatform::Java(java) => {
-            java.try_enqueue_packet(&CRemoveEntities::new(&[VarInt(entity_id)]));
-        }
-        ClientPlatform::Bedrock(bedrock) => {
-            bedrock.try_enqueue_packet(&CRemoveActor::new(VarLong(i64::from(entity_id))));
-        }
-    }
+    player.try_enqueue_packet_editioned(
+        &CRemoveEntities::new(&[VarInt(entity_id)]),
+        &CRemoveActor::new(VarLong(i64::from(entity_id))),
+    );
 }
 
 #[cfg(test)]
