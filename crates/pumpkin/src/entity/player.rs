@@ -376,7 +376,6 @@ pub struct ChunkManager {
     view_distance: u8,
     chunk_listener: Receiver<(Vector2<i32>, Weak<ChunkData>)>,
     chunk_sent: HashMap<Vector2<i32>, Weak<ChunkData>>,
-    sent_chunks: HashSet<Vector2<i32>>,
     chunk_queue: BinaryHeap<HeapNode>,
     entity_chunk_queue: VecDeque<(Vector2<i32>, Weak<ChunkEntityData>)>,
     batches_sent_since_ack: u8,
@@ -385,57 +384,6 @@ pub struct ChunkManager {
     held_tickets: Option<(i8, i8)>,
     /// The current world for chunk loading. Updated on dimension change.
     world: Arc<World>,
-}
-
-struct EntityTracking {
-    ids: ArcSwap<HashSet<i32>>,
-}
-
-impl EntityTracking {
-    fn new() -> Self {
-        Self {
-            ids: ArcSwap::from_pointee(HashSet::new()),
-        }
-    }
-
-    fn mark(&self, entity_id: i32) -> bool {
-        let mut inserted = false;
-        self.ids.rcu(|current| {
-            if current.contains(&entity_id) {
-                return (**current).clone();
-            }
-
-            inserted = true;
-            let mut next = (**current).clone();
-            next.insert(entity_id);
-            next
-        });
-        inserted
-    }
-
-    fn remove(&self, entity_id: i32) -> bool {
-        let mut removed = false;
-        self.ids.rcu(|current| {
-            if !current.contains(&entity_id) {
-                return (**current).clone();
-            }
-
-            removed = true;
-            let mut next = (**current).clone();
-            next.remove(&entity_id);
-            next
-        });
-        removed
-    }
-
-    fn clear(&self) {
-        self.ids.store(Arc::new(HashSet::new()));
-    }
-
-    #[must_use]
-    fn contains(&self, entity_id: i32) -> bool {
-        self.ids.load().contains(&entity_id)
-    }
 }
 
 impl ChunkManager {
@@ -454,7 +402,6 @@ impl ChunkManager {
             view_distance: 0,
             chunk_listener,
             chunk_sent: HashMap::new(),
-            sent_chunks: HashSet::new(),
             chunk_queue: BinaryHeap::new(),
             entity_chunk_queue: VecDeque::new(),
             batches_sent_since_ack: 0,
@@ -477,7 +424,6 @@ impl ChunkManager {
 
     pub fn reset_sent_chunks(&mut self) {
         self.chunk_sent.clear();
-        self.sent_chunks.clear();
     }
 
     pub const fn set_view_distance(&mut self, view_distance: u8) {
@@ -491,7 +437,6 @@ impl ChunkManager {
 
         // Drop any held chunk references to allow chunks to be unloaded.
         self.chunk_sent.clear();
-        self.sent_chunks.clear();
         self.chunk_queue.clear();
         self.entity_chunk_queue.clear();
     }
@@ -578,12 +523,6 @@ impl ChunkManager {
                 && !unloading_chunks.contains(pos)
         });
 
-        self.sent_chunks.retain(|pos| {
-            self.chunk_sent.contains_key(pos)
-                && (pos.x - center.x).abs().max((pos.y - center.y).abs()) <= view_distance_i32
-                && !unloading_chunks.contains(pos)
-        });
-
         self.entity_chunk_queue.retain(|(pos, _)| {
             (pos.x - center.x).abs().max((pos.y - center.y).abs()) <= view_distance_i32
                 && !unloading_chunks.contains(pos)
@@ -631,7 +570,6 @@ impl ChunkManager {
 
         // Drop any held chunk references to allow chunks to be unloaded.
         self.chunk_sent.clear();
-        self.sent_chunks.clear();
         self.chunk_queue.clear();
         self.entity_chunk_queue.clear();
         self.batches_sent_since_ack = 0;
@@ -654,7 +592,6 @@ impl ChunkManager {
         drop(lock);
         self.chunk_listener = new_world.level.chunk_listener.add_global_chunk_listener();
         self.chunk_sent.clear();
-        self.sent_chunks.clear();
         self.chunk_queue.clear();
         self.entity_chunk_queue.clear();
         self.view_distance = 0;
@@ -667,19 +604,6 @@ impl ChunkManager {
     pub const fn handle_acknowledge(&mut self, chunks_per_tick: f32) {
         self.batches_sent_since_ack = 0;
         self.chunks_per_tick = chunks_per_tick.ceil() as usize;
-    }
-
-    pub fn mark_chunks_sent(&mut self, chunks: &[Vector2<i32>]) {
-        for chunk in chunks {
-            if self.chunk_sent.contains_key(chunk) {
-                self.sent_chunks.insert(*chunk);
-            }
-        }
-    }
-
-    #[must_use]
-    pub fn is_chunk_sent(&self, chunk: &Vector2<i32>) -> bool {
-        self.sent_chunks.contains(chunk) && self.chunk_sent.contains_key(chunk)
     }
 
     pub fn push_chunk(&mut self, position: Vector2<i32>, chunk: &SyncChunk) {
@@ -816,8 +740,6 @@ pub struct Player {
     pub awaiting_teleport: Mutex<Option<(VarInt, Vector3<f64>)>>,
     /// The coordinates of the chunk section the player is currently watching.
     pub watched_section: AtomicCell<Cylindrical>,
-    /// Entity IDs for which this client has received a spawn pairing.
-    tracked_entities: EntityTracking,
     /// The last time the player performed an action (for idle timeout).
     pub last_action_time: AtomicCell<Instant>,
     /// The ping in millis.
@@ -1083,7 +1005,6 @@ impl Player {
                 // Since 1 is not possible in vanilla it is used as uninit
                 NonZero::new(1).unwrap_or(NonZero::<u8>::MIN),
             )),
-            tracked_entities: EntityTracking::new(),
             last_action_time: AtomicCell::new(std::time::Instant::now()),
             ping: AtomicU32::new(0),
             last_attacked_ticks: AtomicU32::new(0),
@@ -1284,75 +1205,6 @@ impl Player {
         F::Output: Send + 'static,
     {
         self.client.spawn_task(task)
-    }
-
-    #[must_use]
-    pub(crate) fn is_watching_chunk(&self, chunk: Vector2<i32>) -> bool {
-        self.watched_section
-            .load()
-            .is_within_distance(chunk.x, chunk.y)
-    }
-
-    pub(crate) async fn mark_chunks_sent(&self, chunks: &[Vector2<i32>]) {
-        self.chunk_manager.lock().await.mark_chunks_sent(chunks);
-    }
-
-    #[must_use]
-    pub(crate) fn is_chunk_tracked_now(&self, chunk: Vector2<i32>) -> Option<bool> {
-        if !self.is_watching_chunk(chunk) {
-            return Some(false);
-        }
-
-        self.chunk_manager
-            .try_lock()
-            .ok()
-            .map(|manager| manager.is_chunk_sent(&chunk))
-    }
-
-    pub(crate) fn mark_entity_tracked(&self, entity_id: i32) -> bool {
-        self.tracked_entities.mark(entity_id)
-    }
-
-    pub(crate) fn untrack_entity(&self, entity_id: i32) -> bool {
-        self.tracked_entities.remove(entity_id)
-    }
-
-    pub(crate) fn clear_entity_tracking(&self) {
-        self.tracked_entities.clear();
-    }
-
-    #[must_use]
-    pub(crate) fn is_entity_tracked(&self, entity_id: i32) -> bool {
-        self.tracked_entities.contains(entity_id)
-    }
-
-    /// Sends an entity pairing only after the client is tracking the entity's chunk.
-    pub(crate) async fn send_entity_spawn_if_tracked(&self, entity: &Arc<dyn EntityBase>) -> bool {
-        loop {
-            let base_entity = entity.get_entity();
-            if base_entity.removed.load(Ordering::Acquire) {
-                return false;
-            }
-
-            let chunk = base_entity.chunk_pos.load();
-            if !self.is_watching_chunk(chunk) {
-                return false;
-            }
-
-            let chunk_sent = self.chunk_manager.lock().await.is_chunk_sent(&chunk);
-            if chunk_sent {
-                if !self.mark_entity_tracked(base_entity.entity_id) {
-                    return true;
-                }
-                self.client.enqueue_spawn_packet(entity).await;
-                return true;
-            }
-
-            tokio::select! {
-                () = self.client.await_close_interrupt() => return false,
-                () = tokio::time::sleep(Duration::from_millis(10)) => {}
-            }
-        }
     }
 
     pub const fn inventory(&self) -> &Arc<PlayerInventory> {
@@ -2559,14 +2411,8 @@ impl Player {
             && !chunk_of_chunks.is_empty()
         {
             let client = self.client.clone();
-            let player = self.clone();
-            let chunk_positions: Vec<_> = chunk_of_chunks
-                .iter()
-                .map(|chunk| Vector2::new(chunk.x, chunk.z))
-                .collect();
             tokio::spawn(async move {
                 client.send_chunks(&chunk_of_chunks).await;
-                player.mark_chunks_sent(&chunk_positions).await;
             });
             if let ClientPlatform::Bedrock(bedrock_client) = self.client.as_ref()
                 && !self.bedrock_spawned.load(Ordering::Relaxed)
@@ -3478,7 +3324,6 @@ impl Player {
     }
 
     pub async fn unload_watched_chunks(&self, world: &World) {
-        self.clear_entity_tracking();
         let radial_chunks = self.watched_section.load().all_chunks_within();
         let level = &world.level;
         let chunks_to_clean = level.mark_chunks_as_not_watched(radial_chunks).await;
@@ -7219,7 +7064,7 @@ impl InventoryPlayer for Player {
 
 #[cfg(test)]
 mod tests {
-    use super::{EntityTracking, bedrock_inventory_slot, read_root_vehicle, write_root_vehicle};
+    use super::{bedrock_inventory_slot, read_root_vehicle, write_root_vehicle};
     use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
     use uuid::Uuid;
 
@@ -7231,19 +7076,6 @@ mod tests {
         assert_eq!(bedrock_inventory_slot(44), Some(8));
         assert_eq!(bedrock_inventory_slot(8), None);
         assert_eq!(bedrock_inventory_slot(45), None);
-    }
-
-    #[test]
-    fn entity_pairing_state_is_idempotent_and_reversible() {
-        let tracking = EntityTracking::new();
-
-        assert!(tracking.mark(42));
-        assert!(!tracking.mark(42));
-        assert!(tracking.contains(42));
-
-        assert!(tracking.remove(42));
-        assert!(!tracking.remove(42));
-        assert!(!tracking.contains(42));
     }
 
     #[test]
