@@ -4248,7 +4248,7 @@ impl World {
 
     // NOTE: This function doesn't actually await on anything, it just spawns two tokio tasks
     /// IMPORTANT: Chunks have to be non-empty
-    fn spawn_world_entity_chunks(
+    pub(crate) fn spawn_world_entity_chunks(
         self: &Arc<Self>,
         player: Arc<Player>,
         chunks: Vec<Vector2<i32>>,
@@ -4309,8 +4309,6 @@ impl World {
                     // a duplicate copy that would be re-appended on the next unload
                     // and doubled on every reload.
                     let entity_nbts = std::mem::take(&mut *chunk.data.lock().await);
-                    let mut entities_to_add: Vec<Arc<dyn EntityBase>> =
-                        Vec::with_capacity(entity_nbts.len());
                     for entity_nbt in &entity_nbts {
                         let Some(id) = entity_nbt.get_string("id") else {
                             debug!("Entity has no ID");
@@ -4331,25 +4329,36 @@ impl World {
                         let entity =
                             from_type(entity_type, Vector3::new(0.0, 0.0, 0.0), &world, uuid);
                         entity.read_nbt_non_mut(entity_nbt).await;
-                        entity.init_data_tracker().await;
 
                         let base_entity = entity.get_entity();
                         // Clear velocity so the client does not replay the drop
                         // animation; residual velocity from the original drop is
                         // stale data.
                         base_entity.velocity.store(Vector3::default());
+                        let entity_uuid = base_entity.entity_uuid;
 
-                        player.client.enqueue_spawn_packet(&entity).await;
-                        player.try_restore_vehicle(&entity).await;
-                        entities_to_add.push(entity);
-                    }
+                        // Make the ID resolvable before the client receives its
+                        // spawn sequence. Concurrent chunk loads reuse the live
+                        // entity selected by UUID instead of duplicating it.
+                        let added = world.add_entity_silent(entity.clone()).await;
+                        let live_entity = if added {
+                            Some(entity)
+                        } else {
+                            world
+                                .entities
+                                .load()
+                                .iter()
+                                .find(|live| live.get_entity().entity_uuid == entity_uuid)
+                                .cloned()
+                        };
 
-                    if !entities_to_add.is_empty() {
-                        world.entities.rcu(|current_entities| {
-                            let mut new_entities = (**current_entities).clone();
-                            new_entities.extend(entities_to_add.iter().cloned());
-                            new_entities
-                        });
+                        if let Some(live_entity) = live_entity {
+                            player.client.enqueue_spawn_packet(&live_entity).await;
+                            player.try_restore_vehicle(&live_entity).await;
+                            if added {
+                                live_entity.init_data_tracker().await;
+                            }
+                        }
                     }
                 } else {
                     // The chunk's entities are already live (another watcher loaded
@@ -4778,8 +4787,6 @@ impl World {
     }
 
     pub fn spawn_entity_non_save(&self, entity: &Arc<dyn EntityBase>) {
-        let _base_entity = entity.get_entity();
-        self.broadcast_entity_spawn(entity);
         self.spawn_state.load().add_entity(self, entity.as_ref());
 
         self.entities.rcu(|current_entities| {
@@ -4787,6 +4794,10 @@ impl World {
             new_entities.push(entity.clone());
             new_entities
         });
+
+        // Register first so an immediate interaction with the spawned ID can
+        // resolve the entity from the world lookup.
+        self.broadcast_entity_spawn(entity);
     }
 
     pub async fn spawn_entity(self: &Arc<Self>, entity: Arc<dyn EntityBase>) {
@@ -4803,9 +4814,22 @@ impl World {
             return;
         }
 
-        self.broadcast_entity_spawn(&entity);
-        entity.init_data_tracker().await;
-        self.add_entity_silent(entity).await;
+        if self.add_entity_silent(entity.clone()).await {
+            let chunk_pos = entity.get_entity().chunk_pos.load();
+            let players: Vec<_> = self.players.load().iter().cloned().collect();
+            for player in players {
+                let center = player.get_entity().chunk_pos.load();
+                let view_distance = get_view_distance(&player).get() as i32;
+                if is_within_view_distance(chunk_pos, center, view_distance) {
+                    // Use the entity-specific pairing sequence. This follows
+                    // vanilla's add-entity-before-metadata ordering and keeps
+                    // item, item-frame, and mob metadata in the same client queue.
+                    player.client.enqueue_spawn_packet(&entity).await;
+                    player.try_restore_vehicle(&entity).await;
+                }
+            }
+            entity.init_data_tracker().await;
+        }
     }
 
     pub fn broadcast_entity_spawn(&self, entity: &Arc<dyn EntityBase>) {
@@ -4824,19 +4848,29 @@ impl World {
     }
 
     #[allow(clippy::unused_async)]
-    pub async fn add_entity_silent(&self, entity: Arc<dyn EntityBase>) {
+    pub async fn add_entity_silent(&self, entity: Arc<dyn EntityBase>) -> bool {
         let base_entity = entity.get_entity();
 
         // Guard against duplicate entities with the same UUID.
         // This can happen when chunk entity data is loaded while the entity
         // already exists in the world (e.g. another player is still tracking it).
-        let already_exists = self
-            .entities
-            .load()
+        let previous_entities = self.entities.rcu(|current_entities| {
+            if current_entities
+                .iter()
+                .any(|entity| entity.get_entity().entity_uuid == base_entity.entity_uuid)
+            {
+                return (**current_entities).clone();
+            }
+
+            let mut new_entities = (**current_entities).clone();
+            new_entities.push(entity.clone());
+            new_entities
+        });
+        if previous_entities
             .iter()
-            .any(|e| e.get_entity().entity_uuid == base_entity.entity_uuid);
-        if already_exists {
-            return;
+            .any(|entity| entity.get_entity().entity_uuid == base_entity.entity_uuid)
+        {
+            return false;
         }
 
         // The entity stays live-only: it is written to its chunk's saved data on
@@ -4844,11 +4878,7 @@ impl World {
         // serialized at once (which would double it on the next reload).
         self.spawn_state.load().add_entity(self, entity.as_ref());
 
-        self.entities.rcu(|current_entities| {
-            let mut new_entities = (**current_entities).clone();
-            new_entities.push(entity.clone());
-            new_entities
-        });
+        true
     }
 
     #[allow(clippy::unused_async)]

@@ -126,15 +126,8 @@ impl JavaClient {
                 PlayerInteractUnknownEntityEvent::new(player, entity_id.0, action);
 
                 'after: {
-                    if event.action == ActionType::Attack {
-                        error!(
-                            "Player id {} interacted with entity id {}, which was not found.",
-                            player.entity_id(),
-                            event.entity_id
-                        );
-                        self.kick(TextComponent::translate_cross(translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED, translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED, [],))
-                        .await;
-                    }
+                    // Preserve the unknown-entity event for plugins, but do not
+                    // disconnect for a target that vanished during tracking.
                 }
             }}
         }

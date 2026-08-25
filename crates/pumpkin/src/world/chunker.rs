@@ -119,8 +119,4 @@ pub async fn update_position(player: &Arc<Player>) {
         world.remove_entities_in_chunks(&chunks_to_clean).await;
         world.level.clean_entity_chunks(&chunks_to_clean);
     }
-
-    if !loading_chunks.is_empty() {
-        world.spawn_world_entity_chunks(player.clone(), loading_chunks, new_chunk_center);
-    }
 }

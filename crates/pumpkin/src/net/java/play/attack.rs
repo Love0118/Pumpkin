@@ -32,12 +32,8 @@ impl JavaClient {
             .map(|p| Arc::clone(p) as Arc<dyn EntityBase>)
             .or_else(|| world.get_entity_by_id(entity_id.0));
         let Some(target) = target else {
-            self.kick(TextComponent::translate_cross(
-                translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED,
-                translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED,
-                [],
-            ))
-            .await;
+            // The target can disappear between the client's interaction and
+            // packet handling. Vanilla ignores a missing target here.
             return;
         };
         if let Some(player_victim) = &player_target {

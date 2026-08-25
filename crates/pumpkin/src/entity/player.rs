@@ -2411,8 +2411,16 @@ impl Player {
             && !chunk_of_chunks.is_empty()
         {
             let client = self.client.clone();
+            let player = self.clone();
+            let world = self.world();
+            let center_chunk = self.get_entity().chunk_pos.load();
+            let entity_chunks = chunk_of_chunks
+                .iter()
+                .map(|chunk| Vector2::new(chunk.x, chunk.z))
+                .collect();
             tokio::spawn(async move {
                 client.send_chunks(&chunk_of_chunks).await;
+                world.spawn_world_entity_chunks(player, entity_chunks, center_chunk);
             });
             if let ClientPlatform::Bedrock(bedrock_client) = self.client.as_ref()
                 && !self.bedrock_spawned.load(Ordering::Relaxed)
