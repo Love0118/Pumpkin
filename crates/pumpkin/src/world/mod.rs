@@ -4813,9 +4813,22 @@ impl World {
             return;
         }
 
-        self.broadcast_entity_spawn(&entity);
+        self.broadcast_entity_spawn_async(&entity).await;
         entity.init_data_tracker().await;
         self.add_entity_silent(entity).await;
+    }
+
+    async fn broadcast_entity_spawn_async(&self, entity: &Arc<dyn EntityBase>) {
+        let chunk_pos = entity.get_entity().chunk_pos.load();
+        let players = self.players.load_full();
+        for player in players.iter() {
+            let center = player.get_entity().chunk_pos.load();
+            let view_distance = get_view_distance(player).get() as i32;
+            if is_within_view_distance(chunk_pos, center, view_distance) {
+                // Spawn packets create client state and must not be dropped by a full queue.
+                player.client.enqueue_spawn_packet(entity).await;
+            }
+        }
     }
 
     pub fn broadcast_entity_spawn(&self, entity: &Arc<dyn EntityBase>) {
