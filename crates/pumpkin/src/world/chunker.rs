@@ -96,6 +96,11 @@ pub async fn update_position(player: &Arc<Player>) {
     };
     player.watched_section.store(new_cylindrical);
 
+    for chunk in &unloading_chunks {
+        player.delivered_chunks.remove(chunk);
+    }
+    world.update_entity_tracking_for_player(player);
+
     if let ClientPlatform::Java(client) = player.client.as_ref() {
         for chunk in &unloading_chunks {
             client
@@ -118,5 +123,9 @@ pub async fn update_position(player: &Arc<Player>) {
     if !chunks_to_clean.is_empty() {
         world.remove_entities_in_chunks(&chunks_to_clean).await;
         world.level.clean_entity_chunks(&chunks_to_clean);
+    }
+
+    if !loading_chunks.is_empty() {
+        world.spawn_world_entity_chunks(loading_chunks, new_chunk_center);
     }
 }

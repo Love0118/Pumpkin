@@ -261,7 +261,9 @@ impl LivingEntity {
                 self.entity
                     .world
                     .load()
-                    .broadcast_packet_except_editioned_sync(
+                    .broadcast_to_entity_except_editioned_sync(
+                        self.entity.entity_id,
+                        self.entity.chunk_pos.load(),
                         &[self.entity.entity_uuid],
                         &je_packet,
                         &be_packet,
@@ -271,10 +273,12 @@ impl LivingEntity {
         }
 
         if !sent_editioned {
-            self.entity
-                .world
-                .load()
-                .broadcast_packet_except(&[self.entity.entity_uuid], &je_packet);
+            self.entity.world.load().broadcast_to_entity_except(
+                self.entity.entity_id,
+                self.entity.chunk_pos.load(),
+                &[self.entity.entity_uuid],
+                &je_packet,
+            );
         }
     }
 
@@ -297,8 +301,9 @@ impl LivingEntity {
             }
         }
 
-        let chunk_pos = self.entity.chunk_pos.load();
-        self.entity.world.load().broadcast_to_chunk_editioned_sync(
+        let chunk_pos = item.chunk_pos.load();
+        self.entity.world.load().broadcast_to_entity_editioned_sync(
+            item.entity_id,
             chunk_pos,
             &CTakeItemEntity::new(
                 item.entity_id.into(),
@@ -724,10 +729,12 @@ impl LivingEntity {
         );
 
         let chunk_pos = self.entity.chunk_pos.load();
-        self.entity
-            .world
-            .load()
-            .broadcast_to_chunk_editioned_sync(chunk_pos, &je_packet, &be_packet);
+        self.entity.world.load().broadcast_to_entity_editioned_sync(
+            self.entity.entity_id,
+            chunk_pos,
+            &je_packet,
+            &be_packet,
+        );
         self.sync_effect_particles().await;
     }
 

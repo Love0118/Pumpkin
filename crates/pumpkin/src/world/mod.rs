@@ -20,6 +20,7 @@ use std::{
 use tracing::{debug, error, info, trace, warn};
 
 pub mod chunker;
+mod entity_tracker;
 pub mod explosion;
 pub mod loot;
 pub mod map;
@@ -253,6 +254,7 @@ pub struct World {
     /// A map of active entities within the world, keyed by their unique UUID.
     /// This does not include players.
     pub entities: ArcSwap<Vec<Arc<dyn EntityBase>>>,
+    entity_trackers: DashMap<i32, entity_tracker::EntityTracker>,
     /// The world's scoreboard, used for tracking scores, objectives, and display information.
     pub scoreboard: Mutex<Scoreboard>,
     /// The world's worldborder, defining the playable area and controlling its expansion or contraction.
@@ -384,6 +386,7 @@ impl World {
             level_info,
             players: ArcSwap::new(Arc::new(Vec::new())),
             entities: ArcSwap::new(Arc::new(Vec::new())),
+            entity_trackers: DashMap::new(),
             scoreboard: Mutex::new(Scoreboard::default()),
             worldborder: Mutex::new(Worldborder::new(0.0, 0.0, 5.999_996_8E7, 0, 5, 300)),
             level_time: Mutex::new(LevelTime::new()),
@@ -1271,6 +1274,7 @@ impl World {
         let server_for_entities = server.clone();
         let active_chunks = self.active_chunks.load();
         let level_for_entities = self.level.clone();
+        let world_for_entities = self.clone();
 
         let entity_future = async move {
             let t = tokio::time::Instant::now();
@@ -1308,11 +1312,13 @@ impl World {
                 let batch = entity_batch.to_vec();
                 let s_clone = server_for_entities.clone();
                 let p_cache = players_cache.clone();
+                let world = world_for_entities.clone();
 
                 tasks.spawn(async move {
                     for (entity, entity_chunk) in batch {
                         entity.get_entity().age.fetch_add(1, Relaxed);
                         entity.tick(&entity, &s_clone).await;
+                        world.update_entity_tracking_for_entity(&entity);
 
                         let entity_inner = entity.get_entity();
                         let entity_pos = entity_inner.pos.load();
@@ -4256,11 +4262,10 @@ impl World {
         sleeping_player_count >= required_sleeping
     }
 
-    // NOTE: This function doesn't actually await on anything, it just spawns two tokio tasks
+    // NOTE: This function doesn't await; entity chunk loading is owned by a server task.
     /// IMPORTANT: Chunks have to be non-empty
     pub(crate) fn spawn_world_entity_chunks(
         self: &Arc<Self>,
-        player: Arc<Player>,
         chunks: Vec<Vector2<i32>>,
         center_chunk: Vector2<i32>,
     ) {
@@ -4278,20 +4283,13 @@ impl World {
         let mut entity_receiver = self.level.receive_entity_chunks(chunks);
         let level = self.level.clone();
         let world = self.clone();
+        let Some(server) = self.server.upgrade() else {
+            return;
+        };
 
-        player.clone().spawn_task(async move {
+        server.spawn_task(async move {
             'main: loop {
-                let recv_result = tokio::select! {
-                    () = player.client.await_close_interrupt() => {
-                        debug!("Canceling player packet processing");
-                        None
-                    },
-                    recv_result = entity_receiver.recv() => {
-                        recv_result
-                    }
-                };
-
-                let Some((chunk_weak, first_load)) = recv_result else {
+                let Some((chunk_weak, first_load)) = entity_receiver.recv().await else {
                     break;
                 };
 
@@ -4345,41 +4343,11 @@ impl World {
                         // animation; residual velocity from the original drop is
                         // stale data.
                         base_entity.velocity.store(Vector3::default());
-                        let entity_uuid = base_entity.entity_uuid;
 
-                        // Make the ID resolvable before the client receives its
-                        // spawn sequence. Concurrent chunk loads reuse the live
-                        // entity selected by UUID instead of duplicating it.
-                        let added = world.add_entity_silent(entity.clone()).await;
-                        let live_entity = if added {
-                            Some(entity)
-                        } else {
-                            world
-                                .entities
-                                .load()
-                                .iter()
-                                .find(|live| live.get_entity().entity_uuid == entity_uuid)
-                                .cloned()
-                        };
-
-                        if let Some(live_entity) = live_entity {
-                            player.client.enqueue_spawn_packet(&live_entity).await;
-                            player.try_restore_vehicle(&live_entity).await;
-                            if added {
-                                live_entity.init_data_tracker().await;
-                            }
-                        }
-                    }
-                } else {
-                    // The chunk's entities are already live (another watcher loaded
-                    // them). Just send this player the spawn packets for the live
-                    // entities currently in this chunk.
-                    for entity in world.entities.load().iter() {
-                        let base_entity = entity.get_entity();
-                        if base_entity.chunk_pos.load() == position {
-                            player.client.enqueue_spawn_packet(entity).await;
-                            player.try_restore_vehicle(entity).await;
-                        }
+                        // Initialize state before registration. Entity packet broadcasts are
+                        // suppressed until registration has paired a delivered chunk viewer.
+                        entity.init_data_tracker().await;
+                        world.add_entity_silent(entity).await;
                     }
                 }
             }
@@ -4729,6 +4697,7 @@ impl World {
         player: &Arc<Player>,
         fire_event: bool,
     ) -> Option<Arc<Player>> {
+        self.remove_player_from_entity_tracking(player);
         let mut removed_player: Option<Arc<Player>> = None;
 
         self.players.rcu(|current_list| {
@@ -4804,10 +4773,7 @@ impl World {
             new_entities.push(entity.clone());
             new_entities
         });
-
-        // Register first so an immediate interaction with the spawned ID can
-        // resolve the entity from the world lookup.
-        self.broadcast_entity_spawn(entity);
+        self.register_entity_tracking(entity.clone());
     }
 
     pub async fn spawn_entity(self: &Arc<Self>, entity: Arc<dyn EntityBase>) {
@@ -4824,37 +4790,8 @@ impl World {
             return;
         }
 
-        if self.add_entity_silent(entity.clone()).await {
-            let chunk_pos = entity.get_entity().chunk_pos.load();
-            let players: Vec<_> = self.players.load().iter().cloned().collect();
-            for player in players {
-                let center = player.get_entity().chunk_pos.load();
-                let view_distance = get_view_distance(&player).get() as i32;
-                if is_within_view_distance(chunk_pos, center, view_distance) {
-                    // Use the entity-specific pairing sequence. This follows
-                    // vanilla's add-entity-before-metadata ordering and keeps
-                    // item, item-frame, and mob metadata in the same client queue.
-                    player.client.enqueue_spawn_packet(&entity).await;
-                    player.try_restore_vehicle(&entity).await;
-                }
-            }
-            entity.init_data_tracker().await;
-        }
-    }
-
-    pub fn broadcast_entity_spawn(&self, entity: &Arc<dyn EntityBase>) {
-        let base_entity = entity.get_entity();
-        let chunk_pos = base_entity.chunk_pos.load();
-
-        let players = self.players.load();
-        for player in players.iter() {
-            let center = player.get_entity().chunk_pos.load();
-            let view_distance = get_view_distance(player).get() as i32;
-
-            if is_within_view_distance(chunk_pos, center, view_distance) {
-                player.client.try_enqueue_spawn_packet(entity);
-            }
-        }
+        entity.init_data_tracker().await;
+        self.add_entity_silent(entity).await;
     }
 
     #[allow(clippy::unused_async)]
@@ -4887,6 +4824,7 @@ impl World {
         // unload (see `save_entity`), never at spawn, so it can't be both live and
         // serialized at once (which would double it on the next reload).
         self.spawn_state.load().add_entity(self, entity.as_ref());
+        self.register_entity_tracking(entity);
 
         true
     }
@@ -4910,12 +4848,7 @@ impl World {
             new_entities
         });
 
-        let chunk_pos = base_entity.chunk_pos.load();
-        self.broadcast_to_chunk_editioned_sync(
-            chunk_pos,
-            &CRemoveEntities::new(&[base_entity.entity_id.into()]),
-            &CRemoveActor::new(VarLong(base_entity.entity_id as i64)),
-        );
+        self.remove_entity_tracking(base_entity.entity_id);
     }
 
     pub async fn remove_entities_in_chunks(
@@ -4944,6 +4877,7 @@ impl World {
         });
 
         for entity in entities_to_remove {
+            self.remove_entity_tracking(entity.get_entity().entity_id);
             self.save_entity(&entity).await;
             self.spawn_state.load().remove_entity(self, entity.as_ref());
         }
@@ -6502,14 +6436,9 @@ impl World {
     /// This uses highly optimized Chebyshev distance math (Chunk Grid) instead of floating point distance checks.
     pub fn broadcast_to_chunk<P: ClientPacket>(&self, chunk_pos: Vector2<i32>, packet: &P) {
         let players = self.players.load();
-
-        let recipients = players.iter().filter(|p| {
-            let center = p.get_entity().chunk_pos.load();
-            let view_distance = get_view_distance(p).get() as i32;
-
-            // Chebyshev distance (Minecraft's chunk loading shape)
-            is_within_view_distance(chunk_pos, center, view_distance)
-        });
+        let recipients = players
+            .iter()
+            .filter(|player| player.delivered_chunks.contains(&chunk_pos));
 
         let recipients_by_version = Self::collect_java_recipients_by_version(recipients);
         Self::broadcast_java_grouped(packet, recipients_by_version);
@@ -6522,9 +6451,7 @@ impl World {
     ) {
         let players = self.players.load();
         let recipients = players.iter().filter_map(|player| {
-            let center = player.get_entity().chunk_pos.load();
-            let view_distance = get_view_distance(player).get() as i32;
-            if is_within_view_distance(chunk_pos, center, view_distance)
+            if player.delivered_chunks.contains(&chunk_pos)
                 && let ClientPlatform::Bedrock(client) = player.client.as_ref()
             {
                 return Some(client);
@@ -6544,11 +6471,9 @@ impl World {
         let mut java_recipients = Vec::new();
         let mut bedrock_recipients = Vec::new();
 
-        let recipients = players.iter().filter(|p| {
-            let center = p.get_entity().chunk_pos.load();
-            let view_distance = get_view_distance(p).get() as i32;
-            is_within_view_distance(chunk_pos, center, view_distance)
-        });
+        let recipients = players
+            .iter()
+            .filter(|player| player.delivered_chunks.contains(&chunk_pos));
 
         for p in recipients {
             match p.client.as_ref() {
@@ -6576,10 +6501,7 @@ impl World {
             if except.contains(&p.get_entity().entity_uuid) {
                 return false;
             }
-            let center = p.get_entity().chunk_pos.load();
-            let view_distance = get_view_distance(p).get() as i32;
-
-            is_within_view_distance(chunk_pos, center, view_distance)
+            p.delivered_chunks.contains(&chunk_pos)
         });
 
         let recipients_by_version = Self::collect_java_recipients_by_version(recipients);
@@ -6598,10 +6520,7 @@ impl World {
             if except.contains(&p.get_entity().entity_uuid) {
                 return false;
             }
-            let center = p.get_entity().chunk_pos.load();
-            let view_distance = get_view_distance(p).get() as i32;
-
-            is_within_view_distance(chunk_pos, center, view_distance)
+            p.delivered_chunks.contains(&chunk_pos)
         });
 
         let mut java_recipients = Vec::new();
@@ -6618,6 +6537,124 @@ impl World {
             Self::collect_java_recipients_by_version(java_recipients.into_iter());
         Self::broadcast_java_grouped(je_packet, je_recipients_by_version);
         Self::broadcast_bedrock_grouped_async(be_packet, bedrock_recipients.into_iter()).await;
+    }
+
+    pub(crate) fn entity_packet_recipients(
+        &self,
+        entity_id: i32,
+        chunk_pos: Vector2<i32>,
+    ) -> Vec<Arc<Player>> {
+        self.update_entity_tracking_for_entity_id(entity_id, false);
+        let viewers = self.paired_entity_viewers(entity_id);
+        let players = self.players.load();
+
+        match viewers {
+            Some(viewers) => players
+                .iter()
+                .filter(|player| viewers.contains(&player.gameprofile.id))
+                .cloned()
+                .collect(),
+            None if players.iter().any(|player| player.entity_id() == entity_id) => players
+                .iter()
+                .filter(|player| {
+                    player.entity_id() == entity_id || player.delivered_chunks.contains(&chunk_pos)
+                })
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn broadcast_to_entity<P: ClientPacket>(
+        &self,
+        entity_id: i32,
+        chunk_pos: Vector2<i32>,
+        packet: &P,
+    ) {
+        let recipients = self.entity_packet_recipients(entity_id, chunk_pos);
+        let recipients_by_version = Self::collect_java_recipients_by_version(recipients.iter());
+        Self::broadcast_java_grouped(packet, recipients_by_version);
+    }
+
+    pub fn broadcast_to_entity_except<P: ClientPacket>(
+        &self,
+        entity_id: i32,
+        chunk_pos: Vector2<i32>,
+        except: &[Uuid],
+        packet: &P,
+    ) {
+        let recipients = self.entity_packet_recipients(entity_id, chunk_pos);
+        let recipients_by_version = Self::collect_java_recipients_by_version(
+            recipients
+                .iter()
+                .filter(|player| !except.contains(&player.gameprofile.id)),
+        );
+        Self::broadcast_java_grouped(packet, recipients_by_version);
+    }
+
+    pub fn broadcast_to_entity_bedrock<P: BClientPacket>(
+        &self,
+        entity_id: i32,
+        chunk_pos: Vector2<i32>,
+        packet: &P,
+    ) {
+        let recipients = self.entity_packet_recipients(entity_id, chunk_pos);
+        let bedrock_recipients = recipients.iter().filter_map(|player| {
+            if let ClientPlatform::Bedrock(client) = player.client.as_ref() {
+                Some(client)
+            } else {
+                None
+            }
+        });
+        Self::broadcast_bedrock_grouped(packet, bedrock_recipients);
+    }
+
+    pub fn broadcast_to_entity_editioned_sync<J: ClientPacket, B: BClientPacket>(
+        &self,
+        entity_id: i32,
+        chunk_pos: Vector2<i32>,
+        je_packet: &J,
+        be_packet: &B,
+    ) {
+        let recipients = self.entity_packet_recipients(entity_id, chunk_pos);
+        let mut java_recipients = Vec::new();
+        let mut bedrock_recipients = Vec::new();
+        for player in &recipients {
+            match player.client.as_ref() {
+                ClientPlatform::Java(_) => java_recipients.push(player),
+                ClientPlatform::Bedrock(client) => bedrock_recipients.push(client),
+            }
+        }
+        let recipients_by_version =
+            Self::collect_java_recipients_by_version(java_recipients.into_iter());
+        Self::broadcast_java_grouped(je_packet, recipients_by_version);
+        Self::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
+    }
+
+    pub fn broadcast_to_entity_except_editioned_sync<J: ClientPacket, B: BClientPacket>(
+        &self,
+        entity_id: i32,
+        chunk_pos: Vector2<i32>,
+        except: &[Uuid],
+        je_packet: &J,
+        be_packet: &B,
+    ) {
+        let recipients = self.entity_packet_recipients(entity_id, chunk_pos);
+        let mut java_recipients = Vec::new();
+        let mut bedrock_recipients = Vec::new();
+        for player in &recipients {
+            if except.contains(&player.gameprofile.id) {
+                continue;
+            }
+            match player.client.as_ref() {
+                ClientPlatform::Java(_) => java_recipients.push(player),
+                ClientPlatform::Bedrock(client) => bedrock_recipients.push(client),
+            }
+        }
+        let recipients_by_version =
+            Self::collect_java_recipients_by_version(java_recipients.into_iter());
+        Self::broadcast_java_grouped(je_packet, recipients_by_version);
+        Self::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
     }
 
     pub async fn emit_game_event(&self, event_key: impl Into<String>, position: Vector3<f64>) {

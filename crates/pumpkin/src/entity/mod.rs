@@ -4,7 +4,6 @@ use crate::{
     server::Server,
     world::{
         World,
-        chunker::is_within_view_distance,
         portal::{NetherPortal, PortalProcessor, PortalType, SourcePortalInfo},
     },
 };
@@ -1261,7 +1260,8 @@ impl Entity {
     pub fn send_velocity(&self) {
         let velocity = self.velocity.load();
         let chunk_pos = self.chunk_pos.load();
-        self.world.load().broadcast_to_chunk_editioned_sync(
+        self.world.load().broadcast_to_entity_editioned_sync(
+            self.entity_id,
             chunk_pos,
             &CEntityVelocity::new(self.entity_id.into(), velocity),
             &CSetActorMotion::new(
@@ -1370,7 +1370,8 @@ impl Entity {
         self.last_sent_yaw.store(yaw, Relaxed);
         self.last_sent_pitch.store(pitch, Relaxed);
 
-        self.world.load().broadcast_to_chunk(
+        self.world.load().broadcast_to_entity(
+            self.entity_id,
             chunk_pos,
             &CUpdateEntityRot::new(
                 self.entity_id.into(),
@@ -1390,9 +1391,11 @@ impl Entity {
         }
         self.last_sent_head_yaw.store(head_yaw, Relaxed);
 
-        self.world
-            .load()
-            .broadcast_to_chunk(chunk_pos, &CHeadRot::new(self.entity_id.into(), head_yaw));
+        self.world.load().broadcast_to_entity(
+            self.entity_id,
+            chunk_pos,
+            &CHeadRot::new(self.entity_id.into(), head_yaw),
+        );
     }
 
     fn default_portal_cooldown(&self) -> u32 {
@@ -1753,7 +1756,8 @@ impl Entity {
                 self.on_ground.load(Relaxed),
             );
             if self.entity_type == &EntityType::PLAYER {
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_to_entity_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMovePlayer::new(
@@ -1780,7 +1784,8 @@ impl Entity {
                 if self.on_ground.load(Relaxed) {
                     flags |= MOVE_ACTOR_DELTA_FLAG_ON_GROUND;
                 }
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_to_entity_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMoveActorDelta::new(
@@ -1802,7 +1807,8 @@ impl Entity {
                 self.on_ground.load(Relaxed),
             );
             if self.entity_type == &EntityType::PLAYER {
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_to_entity_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMovePlayer::new(
@@ -1827,7 +1833,8 @@ impl Entity {
                     flags |= MOVE_ACTOR_DELTA_FLAG_ON_GROUND;
                 }
 
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_to_entity_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMoveActorDelta::new(
@@ -1850,7 +1857,8 @@ impl Entity {
                 self.on_ground.load(Relaxed),
             );
             if self.entity_type == &EntityType::PLAYER {
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_to_entity_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMovePlayer::new(
@@ -1874,7 +1882,8 @@ impl Entity {
                 if self.on_ground.load(Relaxed) {
                     flags |= MOVE_ACTOR_DELTA_FLAG_ON_GROUND;
                 }
-                self.world.load().broadcast_to_chunk_editioned_sync(
+                self.world.load().broadcast_to_entity_editioned_sync(
+                    self.entity_id,
                     chunk_pos,
                     &je_packet,
                     &CMoveActorDelta::new(
@@ -1912,7 +1921,7 @@ impl Entity {
             0,
         );
         let world = self.world.load();
-        world.broadcast_to_chunk_bedrock(chunk_pos, &packet);
+        world.broadcast_to_entity_bedrock(self.entity_id, chunk_pos, &packet);
     }
 
     pub fn update_last_pos(&self) -> Vector3<f64> {
@@ -1948,7 +1957,8 @@ impl Entity {
         );
 
         if self.entity_type == &EntityType::PLAYER {
-            self.world.load().broadcast_to_chunk_editioned_sync(
+            self.world.load().broadcast_to_entity_editioned_sync(
+                self.entity_id,
                 chunk_pos,
                 &je_packet,
                 &CMovePlayer::new(
@@ -1973,7 +1983,8 @@ impl Entity {
                 flags |= MOVE_ACTOR_DELTA_FLAG_ON_GROUND;
             }
 
-            self.world.load().broadcast_to_chunk_editioned_sync(
+            self.world.load().broadcast_to_entity_editioned_sync(
+                self.entity_id,
                 chunk_pos,
                 &je_packet,
                 &CMoveActorDelta::new(
@@ -2989,7 +3000,7 @@ impl Entity {
                 },
                 tick: VarULong(0),
             };
-            world.broadcast_to_chunk_bedrock(chunk_pos, &packet);
+            world.broadcast_to_entity_bedrock(self.entity_id, chunk_pos, &packet);
         }
     }
 
@@ -3007,20 +3018,13 @@ impl Entity {
     ) {
         let world = self.world.load();
         let chunk_pos = self.chunk_pos.load();
-        let players = world.players.load();
-
+        let recipients = world.entity_packet_recipients(self.entity_id, chunk_pos);
         let mut java_recipients = Vec::new();
         let mut bedrock_recipients = Vec::new();
-
-        for player in players.iter() {
-            let center = player.get_entity().chunk_pos.load();
-            let view_distance = crate::world::chunker::get_view_distance(player).get() as i32;
-
-            if is_within_view_distance(chunk_pos, center, view_distance) {
-                match player.client.as_ref() {
-                    ClientPlatform::Java(_) => java_recipients.push(player),
-                    ClientPlatform::Bedrock(client) => bedrock_recipients.push(client),
-                }
+        for player in &recipients {
+            match player.client.as_ref() {
+                ClientPlatform::Java(_) => java_recipients.push(player),
+                ClientPlatform::Bedrock(client) => bedrock_recipients.push(client),
             }
         }
 
@@ -3223,7 +3227,8 @@ impl Entity {
                 .store((pitch * 256.0 / 360.0).rem_euclid(256.0) as u8, Relaxed);
         }
         let chunk_pos = self.chunk_pos.load();
-        self.world.load().broadcast_to_chunk(
+        self.world.load().broadcast_to_entity(
+            self.entity_id,
             chunk_pos,
             &CEntityPositionSync::new(
                 self.entity_id.into(),
@@ -3282,7 +3287,8 @@ impl Entity {
             },
         };
 
-        self.world.load().broadcast_to_chunk_editioned_sync(
+        self.world.load().broadcast_to_entity_editioned_sync(
+            self.entity_id,
             self.chunk_pos.load(),
             &je_packet,
             &be_packet,
@@ -3308,7 +3314,8 @@ impl Entity {
             },
         };
 
-        self.world.load().broadcast_to_chunk_editioned_sync(
+        self.world.load().broadcast_to_entity_editioned_sync(
+            self.entity_id,
             self.chunk_pos.load(),
             &je_packet,
             &be_packet,
@@ -3408,7 +3415,8 @@ impl Entity {
 
         let world = self.world.load();
         let chunk_pos = self.chunk_pos.load();
-        world.broadcast_to_chunk(
+        world.broadcast_to_entity(
+            self.entity_id,
             chunk_pos,
             &CSetPassengers::new(VarInt(self.entity_id), &passenger_ids),
         );
@@ -3430,7 +3438,8 @@ impl Entity {
             .collect();
         drop(passengers);
 
-        self.world.load().broadcast_to_chunk(
+        self.world.load().broadcast_to_entity(
+            self.entity_id,
             self.chunk_pos.load(),
             &CSetPassengers::new(VarInt(self.entity_id), &passenger_ids),
         );
@@ -3524,13 +3533,14 @@ impl Entity {
                 {
                     client.send_packet_now(data).await;
                 }
-                world.broadcast_to_chunk_except(
+                world.broadcast_to_entity_except(
+                    self.entity_id,
                     chunk_pos,
                     &[player.get_entity().entity_uuid],
                     &passengers_packet,
                 );
             } else {
-                world.broadcast_to_chunk(chunk_pos, &passengers_packet);
+                world.broadcast_to_entity(self.entity_id, chunk_pos, &passengers_packet);
             }
 
             if !reposition {
@@ -3749,7 +3759,8 @@ impl Entity {
         } else {
             // No passenger was removed, still need to broadcast the passenger list
             let world = self.world.load();
-            world.broadcast_to_chunk(
+            world.broadcast_to_entity(
+                self.entity_id,
                 chunk_pos,
                 &CSetPassengers::new(VarInt(self.entity_id), &passenger_ids),
             );

@@ -38,8 +38,8 @@ use pumpkin_protocol::{
     },
     ser::{NetworkWriteExt, WritingError},
 };
-use pumpkin_util::text::TextComponent;
 use pumpkin_util::version::JavaMinecraftVersion;
+use pumpkin_util::{math::vector2::Vector2, text::TextComponent};
 use tokio::{
     io::{BufReader, BufWriter},
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -335,18 +335,19 @@ impl JavaClient {
         }
     }
 
-    pub async fn send_chunks(&self, chunks: &[SyncChunk]) {
+    pub async fn send_chunks(&self, chunks: &[SyncChunk]) -> Vec<Vector2<i32>> {
         let player = self.player.load_full();
         let Some(player) = player.as_ref() else {
-            return;
+            return Vec::new();
         };
         let Some(server) = player.world().server.upgrade() else {
-            return;
+            return Vec::new();
         };
 
         if self.version.load() >= JavaMinecraftVersion::V_1_20_2 {
             self.send_packet(&CChunkBatchStart).await;
         }
+        let mut delivered_chunks = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             let mut event = ChunkSend::new(player.world(), chunk.clone());
             server.plugin_manager.fire(&server, &mut event).await;
@@ -365,6 +366,7 @@ impl JavaClient {
                 continue;
             }
             self.send_packet_now_data(buf.into()).await;
+            delivered_chunks.push(Vector2::new(chunk.x, chunk.z));
 
             if version >= JavaMinecraftVersion::V_1_14 && version < JavaMinecraftVersion::V_1_18 {
                 match CLightUpdate::from_chunk(chunk, version) {
@@ -389,9 +391,10 @@ impl JavaClient {
             }
         }
         if self.version.load() >= JavaMinecraftVersion::V_1_20_2 {
-            self.send_packet(&CChunkBatchEnd::new(chunks.len() as u16))
+            self.send_packet(&CChunkBatchEnd::new(delivered_chunks.len() as u16))
                 .await;
         }
+        delivered_chunks
     }
 
     pub async fn enqueue_packet(&self, packet_data: Bytes) {
