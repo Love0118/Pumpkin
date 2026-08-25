@@ -4353,8 +4353,6 @@ impl World {
                         // stale data.
                         base_entity.velocity.store(Vector3::default());
 
-                        player.client.enqueue_spawn_packet(&entity).await;
-                        player.try_restore_vehicle(&entity).await;
                         entities_to_add.push(entity);
                     }
 
@@ -4364,6 +4362,13 @@ impl World {
                             new_entities.extend(entities_to_add.iter().cloned());
                             new_entities
                         });
+
+                        // Publish entities only after server lookup can resolve them. This
+                        // mirrors vanilla's registration-before-pairing order.
+                        for entity in &entities_to_add {
+                            player.client.enqueue_spawn_packet(entity).await;
+                            player.try_restore_vehicle(entity).await;
+                        }
                     }
                 } else {
                     // The chunk's entities are already live (another watcher loaded
