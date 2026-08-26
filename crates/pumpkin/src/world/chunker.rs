@@ -96,13 +96,13 @@ pub async fn update_position(player: &Arc<Player>) {
         world
     };
     player.watched_section.store(new_cylindrical);
+    player.forget_sent_chunks(unloading_chunks.iter().copied());
 
     if let ClientPlatform::Java(client) = player.client.as_ref() {
-        let unloading_entity_ids: Vec<VarInt> = world
-            .entity_ids_in_chunks(&unloading_chunks)
-            .into_iter()
-            .map(Into::into)
-            .collect();
+        let stopped_entity_ids =
+            player.stop_tracking_entities(world.entity_ids_in_chunks(&unloading_chunks));
+        let unloading_entity_ids: Vec<VarInt> =
+            stopped_entity_ids.iter().copied().map(Into::into).collect();
 
         if !unloading_entity_ids.is_empty() {
             client
@@ -114,6 +114,12 @@ pub async fn update_position(player: &Arc<Player>) {
             client
                 .enqueue_client_packet(&CUnloadChunk::new(chunk.x, chunk.y))
                 .await;
+        }
+
+        // Entity and player movement run concurrently. Re-evaluate stopped entities after the
+        // chunk transition so an entity that crossed back into view receives a fresh spawn.
+        for entity_id in stopped_entity_ids {
+            world.mark_entity_tracking_dirty(entity_id);
         }
     }
 
@@ -132,8 +138,5 @@ pub async fn update_position(player: &Arc<Player>) {
         world.remove_entities_in_chunks(&chunks_to_clean).await;
         world.level.clean_entity_chunks(&chunks_to_clean);
     }
-
-    if !loading_chunks.is_empty() {
-        world.spawn_world_entity_chunks(player.clone(), loading_chunks, new_chunk_center);
-    }
+    world.sync_player_entity_tracking(player).await;
 }

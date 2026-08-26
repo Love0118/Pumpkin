@@ -255,6 +255,8 @@ pub struct World {
     pub entities: ArcSwap<Vec<Arc<dyn EntityBase>>>,
     /// Runtime entities grouped by their current chunk for tracking operations.
     entity_chunk_index: std::sync::RwLock<entity_chunk_index::EntityChunkIndex>,
+    /// Entities whose player visibility must be re-evaluated after crossing a chunk boundary.
+    entity_tracking_dirty: std::sync::Mutex<FxHashSet<i32>>,
     /// The world's scoreboard, used for tracking scores, objectives, and display information.
     pub scoreboard: Mutex<Scoreboard>,
     /// The world's worldborder, defining the playable area and controlling its expansion or contraction.
@@ -389,6 +391,7 @@ impl World {
             entity_chunk_index: std::sync::RwLock::new(
                 entity_chunk_index::EntityChunkIndex::default(),
             ),
+            entity_tracking_dirty: std::sync::Mutex::new(FxHashSet::default()),
             scoreboard: Mutex::new(Scoreboard::default()),
             worldborder: Mutex::new(Worldborder::new(0.0, 0.0, 5.999_996_8E7, 0, 5, 300)),
             level_time: Mutex::new(LevelTime::new()),
@@ -426,10 +429,14 @@ impl World {
     }
 
     pub(crate) fn update_indexed_entity_chunk(&self, entity_id: i32, chunk: Vector2<i32>) {
-        self.entity_chunk_index
+        let moved = self
+            .entity_chunk_index
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .update_if_present(entity_id, chunk);
+        if moved {
+            self.mark_entity_tracking_dirty(entity_id);
+        }
     }
 
     fn unindex_entity(&self, entity_id: i32) {
@@ -437,6 +444,17 @@ impl World {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(entity_id);
+        self.entity_tracking_dirty
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&entity_id);
+    }
+
+    pub(crate) fn mark_entity_tracking_dirty(&self, entity_id: i32) {
+        self.entity_tracking_dirty
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(entity_id);
     }
 
     pub(crate) fn entity_ids_in_chunks(&self, chunks: &[Vector2<i32>]) -> Vec<i32> {
@@ -453,11 +471,185 @@ impl World {
             .entities_in_chunk(chunk)
     }
 
+    fn entities_in_chunks(&self, chunks: &[Vector2<i32>]) -> Vec<Arc<dyn EntityBase>> {
+        self.entity_chunk_index
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entities_in_chunks(chunks)
+    }
+
     fn indexed_entity_by_id(&self, entity_id: i32) -> Option<Arc<dyn EntityBase>> {
         self.entity_chunk_index
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entity_by_id(entity_id)
+    }
+
+    async fn sync_dirty_entity_tracking(&self) {
+        let dirty_entity_ids = {
+            let mut dirty = self
+                .entity_tracking_dirty
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *dirty)
+        };
+
+        for entity_id in dirty_entity_ids {
+            if let Some(entity) = self.indexed_entity_by_id(entity_id) {
+                self.sync_entity_tracking(&entity).await;
+            }
+        }
+    }
+
+    async fn sync_entity_tracking(&self, entity: &Arc<dyn EntityBase>) {
+        let entity_id = entity.get_entity().entity_id;
+        let players = self.players.load().iter().cloned().collect::<Vec<_>>();
+
+        for player in players {
+            let ClientPlatform::Java(client) = player.client.as_ref() else {
+                continue;
+            };
+            if self.should_track_entity(&player, entity).await {
+                Self::enqueue_entity_pairing(&player, entity).await;
+            } else if player.stop_tracking_entity(entity_id) {
+                let entity_ids = [entity_id.into()];
+                client
+                    .enqueue_client_packet(&CRemoveEntities::new(&entity_ids))
+                    .await;
+            }
+        }
+    }
+
+    pub(crate) async fn sync_player_entity_tracking(&self, player: &Arc<Player>) {
+        if !matches!(player.client.as_ref(), ClientPlatform::Java(_)) {
+            return;
+        }
+
+        let sent_chunks = player.sent_chunks();
+        let candidates = self.entities_in_chunks(&sent_chunks);
+        let mut visible_entity_ids = FxHashSet::default();
+        for entity in candidates {
+            if self.should_track_entity(player, &entity).await {
+                visible_entity_ids.insert(entity.get_entity().entity_id);
+                Self::enqueue_entity_pairing(player, &entity).await;
+            }
+        }
+
+        let stopped_entity_ids = player.stop_tracking_entities(
+            player
+                .tracked_entity_ids()
+                .into_iter()
+                .filter(|entity_id| !visible_entity_ids.contains(entity_id)),
+        );
+        if !stopped_entity_ids.is_empty()
+            && let ClientPlatform::Java(client) = player.client.as_ref()
+        {
+            let entity_ids = stopped_entity_ids
+                .iter()
+                .copied()
+                .map(Into::into)
+                .collect::<Vec<_>>();
+            client
+                .enqueue_client_packet(&CRemoveEntities::new(&entity_ids))
+                .await;
+        }
+    }
+
+    async fn should_track_entity(
+        &self,
+        player: &Arc<Player>,
+        entity: &Arc<dyn EntityBase>,
+    ) -> bool {
+        let base_entity = entity.get_entity();
+        let entity_position = base_entity.pos.load();
+        let entity_chunk = Vector2::new(
+            get_section_cord(entity_position.x.floor() as i32),
+            get_section_cord(entity_position.z.floor() as i32),
+        );
+        if !player
+            .watched_section
+            .load()
+            .is_within_distance(entity_chunk.x, entity_chunk.y)
+            || !player.is_chunk_sent(entity_chunk)
+        {
+            return false;
+        }
+
+        let player_position = player.get_entity().pos.load();
+        let view_range = f64::from(get_view_distance(player).get()) * 16.0;
+        let tracking_range = self.effective_tracking_range(entity).await;
+        let visible_range = tracking_range.min(view_range);
+        let dx = player_position.x - entity_position.x;
+        let dz = player_position.z - entity_position.z;
+
+        dx * dx + dz * dz <= visible_range * visible_range
+    }
+
+    fn should_track_entity_base(player: &Arc<Player>, entity: &Entity) -> bool {
+        let entity_position = entity.pos.load();
+        let entity_chunk = Vector2::new(
+            get_section_cord(entity_position.x.floor() as i32),
+            get_section_cord(entity_position.z.floor() as i32),
+        );
+        if !player
+            .watched_section
+            .load()
+            .is_within_distance(entity_chunk.x, entity_chunk.y)
+            || !player.is_chunk_sent(entity_chunk)
+        {
+            return false;
+        }
+
+        let player_position = player.get_entity().pos.load();
+        let view_range = f64::from(get_view_distance(player).get()) * 16.0;
+        let tracking_range = f64::from(entity.entity_type.client_tracking_range) * 16.0;
+        let visible_range = tracking_range.min(view_range);
+        let dx = player_position.x - entity_position.x;
+        let dz = player_position.z - entity_position.z;
+
+        dx * dx + dz * dz <= visible_range * visible_range
+    }
+
+    async fn effective_tracking_range(&self, entity: &Arc<dyn EntityBase>) -> f64 {
+        let mut range = f64::from(entity.get_entity().entity_type.client_tracking_range) * 16.0;
+        let mut passengers = entity.get_entity().passengers.lock().await.clone();
+        let mut visited = FxHashSet::default();
+
+        while let Some(passenger) = passengers.pop() {
+            let passenger_entity = passenger.get_entity();
+            if !visited.insert(passenger_entity.entity_id) {
+                continue;
+            }
+            range = range.max(f64::from(passenger_entity.entity_type.client_tracking_range) * 16.0);
+            passengers.extend(passenger_entity.passengers.lock().await.iter().cloned());
+        }
+
+        range
+    }
+
+    async fn pair_entity_with_player(&self, player: &Arc<Player>, entity: &Arc<dyn EntityBase>) {
+        if matches!(player.client.as_ref(), ClientPlatform::Java(_))
+            && !self.should_track_entity(player, entity).await
+        {
+            return;
+        }
+        Self::enqueue_entity_pairing(player, entity).await;
+    }
+
+    async fn enqueue_entity_pairing(player: &Arc<Player>, entity: &Arc<dyn EntityBase>) {
+        if matches!(player.client.as_ref(), ClientPlatform::Java(_))
+            && !player.start_tracking_entity(entity.get_entity().entity_id)
+        {
+            return;
+        }
+        player.client.enqueue_spawn_packet(entity).await;
+        player.try_restore_vehicle(entity).await;
+    }
+
+    fn forget_entity_tracking(&self, entity_id: i32) {
+        for player in self.players.load().iter() {
+            player.stop_tracking_entity(entity_id);
+        }
     }
 
     pub fn update_active_chunks(self: &Arc<Self>) {
@@ -1446,6 +1638,7 @@ impl World {
             entity_future,
             block_entity_future
         );
+        self.sync_dirty_entity_tracking().await;
 
         self.level
             .chunk_loading
@@ -3263,6 +3456,10 @@ impl World {
         if client.version.load() >= JavaMinecraftVersion::V_1_20_2 {
             client.send_packet(&CChunkBatchEnd::new(1u16)).await;
         }
+        player.mark_chunks_sent([center_chunk]);
+        player
+            .world()
+            .spawn_world_entity_chunks(player.clone(), vec![center_chunk], center_chunk);
 
         let velocity = player.living_entity.entity.velocity.load();
 
@@ -4326,7 +4523,7 @@ impl World {
 
     // NOTE: This function doesn't actually await on anything, it just spawns two tokio tasks
     /// IMPORTANT: Chunks have to be non-empty
-    fn spawn_world_entity_chunks(
+    pub(crate) fn spawn_world_entity_chunks(
         self: &Arc<Self>,
         player: Arc<Player>,
         chunks: Vec<Vector2<i32>>,
@@ -4433,8 +4630,7 @@ impl World {
                         // Publish entities only after server lookup can resolve them. This
                         // mirrors vanilla's registration-before-pairing order.
                         for entity in &entities_to_add {
-                            player.client.enqueue_spawn_packet(entity).await;
-                            player.try_restore_vehicle(entity).await;
+                            world.pair_entity_with_player(&player, entity).await;
                         }
                     }
                 } else {
@@ -4442,8 +4638,7 @@ impl World {
                     // them). Just send this player the spawn packets for the live
                     // entities currently in this chunk.
                     for entity in world.entities_in_chunk(position) {
-                        player.client.enqueue_spawn_packet(&entity).await;
-                        player.try_restore_vehicle(&entity).await;
+                        world.pair_entity_with_player(&player, &entity).await;
                     }
                 }
             }
@@ -4867,7 +5062,6 @@ impl World {
 
     pub fn spawn_entity_non_save(&self, entity: &Arc<dyn EntityBase>) {
         let _base_entity = entity.get_entity();
-        self.broadcast_entity_spawn(entity);
         self.spawn_state.load().add_entity(self, entity.as_ref());
 
         self.entities.rcu(|current_entities| {
@@ -4876,6 +5070,8 @@ impl World {
             new_entities
         });
         self.index_entity(entity);
+        // Tracking starts only after server lookups can resolve the entity ID.
+        self.broadcast_entity_spawn(entity);
     }
 
     pub async fn spawn_entity(self: &Arc<Self>, entity: Arc<dyn EntityBase>) {
@@ -4892,9 +5088,12 @@ impl World {
             return;
         }
 
+        if !self.add_entity_silent(entity.clone()).await {
+            return;
+        }
+        // Vanilla registers the entity before beginning client pairing.
         self.broadcast_entity_spawn(&entity);
         entity.init_data_tracker().await;
-        self.add_entity_silent(entity).await;
     }
 
     pub fn broadcast_entity_spawn(&self, entity: &Arc<dyn EntityBase>) {
@@ -4906,14 +5105,20 @@ impl World {
             let center = player.get_entity().chunk_pos.load();
             let view_distance = get_view_distance(player).get() as i32;
 
-            if is_within_view_distance(chunk_pos, center, view_distance) {
+            let should_send = if matches!(player.client.as_ref(), ClientPlatform::Java(_)) {
+                Self::should_track_entity_base(player, base_entity)
+                    && player.start_tracking_entity(base_entity.entity_id)
+            } else {
+                is_within_view_distance(chunk_pos, center, view_distance)
+            };
+            if should_send {
                 player.client.try_enqueue_spawn_packet(entity);
             }
         }
     }
 
     #[allow(clippy::unused_async)]
-    pub async fn add_entity_silent(&self, entity: Arc<dyn EntityBase>) {
+    pub async fn add_entity_silent(&self, entity: Arc<dyn EntityBase>) -> bool {
         let base_entity = entity.get_entity();
 
         // Guard against duplicate entities with the same UUID.
@@ -4925,7 +5130,7 @@ impl World {
             .iter()
             .any(|e| e.get_entity().entity_uuid == base_entity.entity_uuid);
         if already_exists {
-            return;
+            return false;
         }
 
         // The entity stays live-only: it is written to its chunk's saved data on
@@ -4939,6 +5144,7 @@ impl World {
             new_entities
         });
         self.index_entity(&entity);
+        true
     }
 
     #[allow(clippy::unused_async)]
@@ -4954,6 +5160,7 @@ impl World {
         base_entity.removed.store(true, Ordering::Release);
 
         self.spawn_state.load().remove_entity(self, entity);
+        self.forget_entity_tracking(base_entity.entity_id);
         self.unindex_entity(base_entity.entity_id);
         self.entities.rcu(|current_entities| {
             let mut new_entities = (**current_entities).clone();
@@ -4995,7 +5202,9 @@ impl World {
         });
 
         for entity in entities_to_remove {
-            self.unindex_entity(entity.get_entity().entity_id);
+            let entity_id = entity.get_entity().entity_id;
+            self.forget_entity_tracking(entity_id);
+            self.unindex_entity(entity_id);
             self.save_entity(&entity).await;
             self.spawn_state.load().remove_entity(self, entity.as_ref());
         }

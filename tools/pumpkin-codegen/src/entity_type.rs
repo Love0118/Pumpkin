@@ -79,13 +79,14 @@ pub enum MobCategory {
 }
 
 /// Pairs a raw entity name string with its deserialized [`EntityType`] data for token generation.
-pub struct NamedEntityType<'a>(&'a str, &'a EntityType);
+pub struct NamedEntityType<'a>(&'a str, &'a EntityType, u8);
 
 impl ToTokens for NamedEntityType<'_> {
     /// Emits an `EntityType { … }` struct literal token stream for the wrapped entity.
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let name = self.0;
         let entity = self.1;
+        let client_tracking_range = self.2;
         let id = LitInt::new(&entity.id.to_string(), proc_macro2::Span::call_site());
 
         let attribute_tokens = entity
@@ -200,6 +201,7 @@ impl ToTokens for NamedEntityType<'_> {
                 loot_table: #loot_table,
                 dimension: [#dimension0, #dimension1], // Correctly construct the array
                 eye_height: #eye_height,
+                client_tracking_range: #client_tracking_range,
                 spawn_restriction: #spawn_restriction,
                 resource_name: #name,
             }
@@ -213,6 +215,15 @@ pub fn build() -> TokenStream {
     let json: BTreeMap<String, EntityType> =
         serde_json::from_str(&fs::read_to_string("../../assets/entities.json").unwrap())
             .expect("Failed to parse entities.json");
+    let tracking_ranges: BTreeMap<String, u8> = serde_json::from_str(
+        &fs::read_to_string("../../assets/entity_tracking_ranges.json").unwrap(),
+    )
+    .expect("Failed to parse entity_tracking_ranges.json");
+    assert_eq!(
+        json.keys().collect::<Vec<_>>(),
+        tracking_ranges.keys().collect::<Vec<_>>(),
+        "entity tracking ranges must cover every entity type"
+    );
 
     let mut consts = TokenStream::new();
     let mut type_from_raw_id_arms = TokenStream::new();
@@ -224,7 +235,7 @@ pub fn build() -> TokenStream {
         let id_lit = LitInt::new(&id.to_string(), proc_macro2::Span::call_site());
         let upper_name = format_ident!("{}", name.to_uppercase());
 
-        let entity_tokens = NamedEntityType(name, entity).to_token_stream();
+        let entity_tokens = NamedEntityType(name, entity, tracking_ranges[name]).to_token_stream();
 
         consts.extend(quote! {
             pub const #upper_name: EntityType = #entity_tokens;
@@ -269,6 +280,7 @@ pub fn build() -> TokenStream {
             pub loot_table: Option<LootTable>,
             pub dimension: [f32; 2],
             pub eye_height: f32,
+            pub client_tracking_range: u8,
             pub spawn_restriction: SpawnRestriction,
             pub resource_name: &'static str,
         }

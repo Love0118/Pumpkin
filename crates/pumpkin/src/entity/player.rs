@@ -1,4 +1,5 @@
 pub mod advancement;
+mod entity_tracking;
 pub mod statistics;
 
 use core::f32;
@@ -16,6 +17,7 @@ use advancement::PlayerAdvancement;
 use arc_swap::ArcSwap;
 use crossbeam::atomic::AtomicCell;
 use crossbeam::channel::Receiver;
+use entity_tracking::EntityTrackingState;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_inventory::merchant::merchant_screen_handler::MerchantScreenHandler;
 use pumpkin_inventory::player::ender_chest_inventory::EnderChestInventory;
@@ -780,6 +782,7 @@ pub struct Player {
     pub item_cooldowns: Mutex<HashMap<String, ItemCooldown>>,
     pub experience_pick_up_delay: Mutex<u32>,
     pub chunk_manager: Mutex<ChunkManager>,
+    entity_tracking: EntityTrackingState,
     pub has_played_before: AtomicBool,
     root_vehicle_uuid: AtomicCell<Option<Uuid>>,
     pub chat_session: Arc<Mutex<ChatSession>>,
@@ -846,6 +849,45 @@ struct SkinMetadata {
 }
 
 impl Player {
+    pub(crate) fn start_tracking_entity(&self, entity_id: i32) -> bool {
+        self.entity_tracking.start_tracking(entity_id)
+    }
+
+    pub(crate) fn stop_tracking_entity(&self, entity_id: i32) -> bool {
+        self.entity_tracking.stop_tracking(entity_id)
+    }
+
+    pub(crate) fn stop_tracking_entities(
+        &self,
+        entity_ids: impl IntoIterator<Item = i32>,
+    ) -> Vec<i32> {
+        self.entity_tracking.stop_tracking_candidates(entity_ids)
+    }
+
+    pub(crate) fn clear_tracked_entities(&self) {
+        self.entity_tracking.clear();
+    }
+
+    pub(crate) fn tracked_entity_ids(&self) -> Vec<i32> {
+        self.entity_tracking.tracked_ids()
+    }
+
+    pub(crate) fn mark_chunks_sent(&self, chunks: impl IntoIterator<Item = Vector2<i32>>) {
+        self.entity_tracking.mark_chunks_sent(chunks);
+    }
+
+    pub(crate) fn forget_sent_chunks(&self, chunks: impl IntoIterator<Item = Vector2<i32>>) {
+        self.entity_tracking.forget_chunks(chunks);
+    }
+
+    pub(crate) fn is_chunk_sent(&self, chunk: Vector2<i32>) -> bool {
+        self.entity_tracking.is_chunk_sent(chunk)
+    }
+
+    pub(crate) fn sent_chunks(&self) -> Vec<Vector2<i32>> {
+        self.entity_tracking.sent_chunks()
+    }
+
     #[must_use]
     pub fn fetch_skin(properties: &[Property]) -> Option<pumpkin_protocol::bedrock::client::Skin> {
         let textures_prop = properties.iter().find(|p| &*p.name == "textures")?;
@@ -1046,6 +1088,7 @@ impl Player {
                 world.level.chunk_listener.add_global_chunk_listener(),
                 world.clone(),
             )),
+            entity_tracking: EntityTrackingState::default(),
             last_sent_xp: AtomicI32::new(-1),
             last_sent_health: AtomicI32::new(-1),
             last_sent_food: AtomicU8::new(0),
@@ -2415,7 +2458,7 @@ impl Player {
                 *xp -= 1;
             }
         }
-        let (chunk_of_chunks, total_sent_chunks) = {
+        let (chunk_of_chunks, total_sent_chunks, chunk_world) = {
             let mut chunk_manager = self.chunk_manager.lock().await;
             chunk_manager.pull_new_chunks();
             let chunks = if let ClientPlatform::Java(java_client) = self.client.as_ref() {
@@ -2433,14 +2476,41 @@ impl Player {
             } else {
                 (!chunk_manager.chunk_queue.is_empty()).then(|| chunk_manager.next_chunk())
             };
-            (chunks, chunk_manager.sent_chunks_count())
+            (
+                chunks,
+                chunk_manager.sent_chunks_count(),
+                chunk_manager.world().clone(),
+            )
         };
         if let Some(chunk_of_chunks) = chunk_of_chunks
             && !chunk_of_chunks.is_empty()
         {
             let client = self.client.clone();
+            let player = self.clone();
+            let chunk_positions = chunk_of_chunks
+                .iter()
+                .map(|chunk| Vector2::new(chunk.x, chunk.z))
+                .collect::<Vec<_>>();
             tokio::spawn(async move {
                 client.send_chunks(&chunk_of_chunks).await;
+                if player.world().uuid == chunk_world.uuid {
+                    // A queued batch can finish after the player has moved. Only activate
+                    // entities for chunks that are still tracked at completion time.
+                    let watched_section = player.watched_section.load();
+                    let chunk_positions = chunk_positions
+                        .into_iter()
+                        .filter(|chunk| watched_section.is_within_distance(chunk.x, chunk.y))
+                        .collect::<Vec<_>>();
+                    if !chunk_positions.is_empty() {
+                        player.mark_chunks_sent(chunk_positions.iter().copied());
+                        let current_center = player.get_entity().chunk_pos.load();
+                        chunk_world.spawn_world_entity_chunks(
+                            player,
+                            chunk_positions,
+                            current_center,
+                        );
+                    }
+                }
             });
             if let ClientPlatform::Bedrock(bedrock_client) = self.client.as_ref()
                 && !self.bedrock_spawned.load(Ordering::Relaxed)
@@ -3378,6 +3448,7 @@ impl Player {
             Vector2::new(0, 0),
             NonZero::new(1).unwrap_or(NonZero::<u8>::MIN),
         ));
+        self.clear_tracked_entities();
     }
 
     /// Teleports the player to a different world or dimension with an optional position, yaw, and pitch.

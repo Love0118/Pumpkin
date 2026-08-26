@@ -3415,6 +3415,8 @@ impl Entity {
             chunk_pos,
             &CSetPassengers::new(VarInt(self.entity_id), &passenger_ids),
         );
+        // Vanilla derives the vehicle's effective tracking range from its passenger tree.
+        world.mark_entity_tracking_dirty(self.entity_id);
     }
 
     pub(crate) async fn remove_passenger_on_disconnect(&self, passenger_id: i32) {
@@ -3433,10 +3435,12 @@ impl Entity {
             .collect();
         drop(passengers);
 
-        self.world.load().broadcast_to_chunk(
+        let world = self.world.load();
+        world.broadcast_to_chunk(
             self.chunk_pos.load(),
             &CSetPassengers::new(VarInt(self.entity_id), &passenger_ids),
         );
+        world.mark_entity_tracking_dirty(self.entity_id);
     }
 
     pub async fn remove_passenger(&self, passenger_id: i32) {
@@ -3757,6 +3761,9 @@ impl Entity {
                 &CSetPassengers::new(VarInt(self.entity_id), &passenger_ids),
             );
         }
+
+        // The largest passenger tracking range participates in the vehicle's range.
+        self.world.load().mark_entity_tracking_dirty(self.entity_id);
     }
 
     pub async fn check_out_of_world(&self, dyn_self: &dyn EntityBase) {

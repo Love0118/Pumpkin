@@ -24,6 +24,7 @@ pub struct EntityType {
     pub loot_table: Option<LootTable>,
     pub dimension: [f32; 2],
     pub eye_height: f32,
+    pub client_tracking_range: u8,
     pub spawn_restriction: SpawnRestriction,
     pub resource_name: &'static str,
 }
@@ -163,6 +164,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -185,6 +187,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -241,6 +244,7 @@ impl EntityType {
         }),
         dimension: [0.35f32, 0.6f32],
         eye_height: 0.36f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -263,6 +267,7 @@ impl EntityType {
         loot_table: None,
         dimension: [6f32, 0.5f32],
         eye_height: 0.425f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -318,6 +323,7 @@ impl EntityType {
         }),
         dimension: [0.7f32, 0.65f32],
         eye_height: 0.26f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -371,6 +377,7 @@ impl EntityType {
         }),
         dimension: [0.5f32, 1.975f32],
         eye_height: 1.7775f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -393,6 +400,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.5f32, 0.5f32],
         eye_height: 0.13f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -449,6 +457,7 @@ impl EntityType {
         }),
         dimension: [0.75f32, 0.42f32],
         eye_height: 0.2751f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -471,6 +480,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -493,6 +503,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -547,6 +558,7 @@ impl EntityType {
         }),
         dimension: [0.5f32, 0.9f32],
         eye_height: 0.45f32,
+        client_tracking_range: 5u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -604,6 +616,7 @@ impl EntityType {
         }),
         dimension: [0.55f32, 0.5f32],
         eye_height: 0.3f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -626,6 +639,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -648,6 +662,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -739,6 +754,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.8f32],
         eye_height: 1.53f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -761,6 +777,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0f32, 0f32],
         eye_height: 0f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -934,6 +951,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.99f32],
         eye_height: 1.74f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1025,6 +1043,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.77f32],
         eye_height: 1.3452f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1047,6 +1066,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.3125f32, 0.3125f32],
         eye_height: 0f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1102,6 +1122,7 @@ impl EntityType {
         }),
         dimension: [1.7f32, 2.375f32],
         eye_height: 2.275f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1193,6 +1214,7 @@ impl EntityType {
         }),
         dimension: [1.7f32, 2.375f32],
         eye_height: 2.275f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1272,6 +1294,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 0.7f32],
         eye_height: 0.35f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1402,6 +1425,7 @@ impl EntityType {
         }),
         dimension: [0.7f32, 0.5f32],
         eye_height: 0.45f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1424,6 +1448,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1446,6 +1471,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1468,6 +1494,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.98f32, 0.7f32],
         eye_height: 0.595f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1605,6 +1632,7 @@ impl EntityType {
         }),
         dimension: [0.4f32, 0.7f32],
         eye_height: 0.644f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1706,6 +1734,7 @@ impl EntityType {
         }),
         dimension: [0.5f32, 0.3f32],
         eye_height: 0.195f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1728,6 +1757,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.98f32, 0.7f32],
         eye_height: 0.595f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1818,6 +1848,7 @@ impl EntityType {
         }),
         dimension: [0.49f32, 0.98f32],
         eye_height: 0.8125f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -1965,6 +1996,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 1.4f32],
         eye_height: 1.3f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2020,6 +2052,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 2.7f32],
         eye_height: 2.3f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2134,6 +2167,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.7f32],
         eye_height: 1.445f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2156,6 +2190,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2178,6 +2213,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2286,6 +2322,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 0.6f32],
         eye_height: 0.3f32,
+        client_tracking_range: 5u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2377,6 +2414,7 @@ impl EntityType {
         }),
         dimension: [1.3964844f32, 1.5f32],
         eye_height: 1.425f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2399,6 +2437,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1f32, 1f32],
         eye_height: 0.85f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2514,6 +2553,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.74f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2536,6 +2576,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2779,6 +2820,7 @@ impl EntityType {
         }),
         dimension: [1.9975f32, 1.9975f32],
         eye_height: 0.99875f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2801,6 +2843,7 @@ impl EntityType {
         loot_table: None,
         dimension: [2f32, 2f32],
         eye_height: 1.7f32,
+        client_tracking_range: 16u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2855,6 +2898,7 @@ impl EntityType {
         }),
         dimension: [16f32, 8f32],
         eye_height: 6.8f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2877,6 +2921,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -2968,6 +3013,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 2.9f32],
         eye_height: 2.55f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3023,6 +3069,7 @@ impl EntityType {
         }),
         dimension: [0.4f32, 0.3f32],
         eye_height: 0.13f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3131,6 +3178,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.6575f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3153,6 +3201,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.5f32, 0.8f32],
         eye_height: 0.68f32,
+        client_tracking_range: 6u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3175,6 +3224,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3197,6 +3247,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.5f32, 0.5f32],
         eye_height: 0.425f32,
+        client_tracking_range: 6u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3219,6 +3270,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3241,6 +3293,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.98f32, 0.98f32],
         eye_height: 0.83300006f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3263,6 +3316,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1f32, 1f32],
         eye_height: 0.85f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3285,6 +3339,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3307,6 +3362,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3363,6 +3419,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 0.7f32],
         eye_height: 0.4f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3419,6 +3476,7 @@ impl EntityType {
         }),
         dimension: [0.5f32, 0.5f32],
         eye_height: 0.425f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3441,6 +3499,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.98f32, 0.7f32],
         eye_height: 0.595f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3598,6 +3657,7 @@ impl EntityType {
         }),
         dimension: [4f32, 4f32],
         eye_height: 2.6f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3653,6 +3713,7 @@ impl EntityType {
         }),
         dimension: [3.6f32, 12f32],
         eye_height: 10.44f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3675,6 +3736,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.5f32, 0.5f32],
         eye_height: 0f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3765,6 +3827,7 @@ impl EntityType {
         }),
         dimension: [0.8f32, 0.8f32],
         eye_height: 0.4f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -3821,6 +3884,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 1.3f32],
         eye_height: 1.105f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4025,6 +4089,7 @@ impl EntityType {
         }),
         dimension: [0.85f32, 0.85f32],
         eye_height: 0.425f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4081,6 +4146,7 @@ impl EntityType {
         }),
         dimension: [4f32, 4f32],
         eye_height: 2.6f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4228,6 +4294,7 @@ impl EntityType {
         }),
         dimension: [1.3964844f32, 1.4f32],
         eye_height: 1.19f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4250,6 +4317,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.98f32, 0.7f32],
         eye_height: 0.595f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4341,6 +4409,7 @@ impl EntityType {
         }),
         dimension: [1.3964844f32, 1.6f32],
         eye_height: 1.52f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4534,6 +4603,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.74f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4589,6 +4659,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.6575f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4611,6 +4682,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0f32, 0f32],
         eye_height: 0f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4715,6 +4787,7 @@ impl EntityType {
         }),
         dimension: [1.4f32, 2.7f32],
         eye_height: 2.295f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4737,6 +4810,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 6u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4759,6 +4833,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0f32, 0f32],
         eye_height: 0f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4781,6 +4856,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.5f32, 0.5f32],
         eye_height: 0f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4803,6 +4879,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4825,6 +4902,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4847,6 +4925,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.375f32, 0.5f32],
         eye_height: 0.0625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4869,6 +4948,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0f32, 0f32],
         eye_height: 0f32,
+        client_tracking_range: 16u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4891,6 +4971,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -4982,6 +5063,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 1.87f32],
         eye_height: 1.7765f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5004,6 +5086,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5162,6 +5245,7 @@ impl EntityType {
         }),
         dimension: [0.52f32, 0.52f32],
         eye_height: 0.325f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5184,6 +5268,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5206,6 +5291,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5259,6 +5345,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.8f32],
         eye_height: 1.62f32,
+        client_tracking_range: 32u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5281,6 +5368,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0f32, 0f32],
         eye_height: 0f32,
+        client_tracking_range: 0u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5303,6 +5391,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.98f32, 0.7f32],
         eye_height: 0.595f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5450,6 +5539,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 1.4f32],
         eye_height: 1.3f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5541,6 +5631,7 @@ impl EntityType {
         }),
         dimension: [1.3964844f32, 1.6f32],
         eye_height: 1.52f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5617,6 +5708,7 @@ impl EntityType {
         }),
         dimension: [0.875f32, 0.95f32],
         eye_height: 0.2751f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5639,6 +5731,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5661,6 +5754,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5717,6 +5811,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 0.7f32],
         eye_height: 0.595f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlocking,
@@ -5739,6 +5834,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5761,6 +5857,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.5f32, 0.5f32],
         eye_height: 0.425f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5783,6 +5880,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5805,6 +5903,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -5881,6 +5980,7 @@ impl EntityType {
         }),
         dimension: [1.3f32, 1.25f32],
         eye_height: 1.0625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -6054,6 +6154,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.99f32],
         eye_height: 1.74f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -6147,6 +6248,7 @@ impl EntityType {
         }),
         dimension: [0.5f32, 0.9f32],
         eye_height: 0.54f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlocking,
@@ -6238,6 +6340,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 0.5f32],
         eye_height: 0.175f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -6346,6 +6449,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 0.9f32],
         eye_height: 0.765f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -6401,6 +6505,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.79f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -6456,6 +6561,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.79f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -6542,6 +6648,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.6575f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -6568,6 +6675,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.8f32],
         eye_height: 1.62f32,
+        client_tracking_range: 32u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -6727,6 +6835,7 @@ impl EntityType {
         }),
         dimension: [1.4f32, 1.4f32],
         eye_height: 1.19f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -6818,6 +6927,7 @@ impl EntityType {
         }),
         dimension: [0.7f32, 0.7f32],
         eye_height: 0.455f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -6984,6 +7094,7 @@ impl EntityType {
         }),
         dimension: [0.49f32, 0.6f32],
         eye_height: 0.59f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -7059,6 +7170,7 @@ impl EntityType {
         }),
         dimension: [1.95f32, 2.2f32],
         eye_height: 1.8700001f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -7160,6 +7272,7 @@ impl EntityType {
         }),
         dimension: [0.7f32, 0.4f32],
         eye_height: 0.26f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -7510,6 +7623,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 1.3f32],
         eye_height: 1.235f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -7581,6 +7695,7 @@ impl EntityType {
         }),
         dimension: [1f32, 1f32],
         eye_height: 0.5f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -7603,6 +7718,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.3125f32, 0.3125f32],
         eye_height: 0.265625f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -7658,6 +7774,7 @@ impl EntityType {
         }),
         dimension: [0.4f32, 0.3f32],
         eye_height: 0.13f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -7788,6 +7905,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.99f32],
         eye_height: 1.74f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -7879,6 +7997,7 @@ impl EntityType {
         }),
         dimension: [1.3964844f32, 1.6f32],
         eye_height: 1.52f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8000,6 +8119,7 @@ impl EntityType {
         }),
         dimension: [0.52f32, 0.52f32],
         eye_height: 0.325f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8022,6 +8142,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.3125f32, 0.3125f32],
         eye_height: 0.265625f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8077,6 +8198,7 @@ impl EntityType {
         }),
         dimension: [1.9f32, 1.75f32],
         eye_height: 1.05f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8154,6 +8276,7 @@ impl EntityType {
         }),
         dimension: [0.7f32, 1.9f32],
         eye_height: 1.7f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8176,6 +8299,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8198,6 +8322,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.98f32, 0.7f32],
         eye_height: 0.595f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8220,6 +8345,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.5f32, 0.5f32],
         eye_height: 0.13f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8350,6 +8476,7 @@ impl EntityType {
         }),
         dimension: [1.4f32, 0.9f32],
         eye_height: 0.65f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8372,6 +8499,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.25f32, 0.25f32],
         eye_height: 0.2125f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8394,6 +8522,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8416,6 +8545,7 @@ impl EntityType {
         loot_table: None,
         dimension: [1.375f32, 0.5625f32],
         eye_height: 0.5625f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8506,6 +8636,7 @@ impl EntityType {
         }),
         dimension: [0.8f32, 0.8f32],
         eye_height: 0.4f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8679,6 +8810,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.99f32],
         eye_height: 1.74f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8770,6 +8902,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 1.7f32],
         eye_height: 1.445f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InLava,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8825,6 +8958,7 @@ impl EntityType {
         }),
         dimension: [0.49f32, 0.49f32],
         eye_height: 0.175f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8880,6 +9014,7 @@ impl EntityType {
         }),
         dimension: [0.4f32, 0.3f32],
         eye_height: 0.19500001f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8902,6 +9037,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0f32, 0f32],
         eye_height: 0f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8924,6 +9060,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.98f32, 0.98f32],
         eye_height: 0.15f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -8946,6 +9083,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.98f32, 0.7f32],
         eye_height: 0.595f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9037,6 +9175,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 1.87f32],
         eye_height: 1.7765f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9059,6 +9198,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.5f32, 0.5f32],
         eye_height: 0.13f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9150,6 +9290,7 @@ impl EntityType {
         }),
         dimension: [0.5f32, 0.4f32],
         eye_height: 0.26f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9261,6 +9402,7 @@ impl EntityType {
         }),
         dimension: [1.2f32, 0.4f32],
         eye_height: 0.34f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9316,6 +9458,7 @@ impl EntityType {
         }),
         dimension: [0.4f32, 0.8f32],
         eye_height: 0.51875f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9370,6 +9513,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.62f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9461,6 +9605,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.6575f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9515,6 +9660,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.62f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9584,6 +9730,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 2.9f32],
         eye_height: 2.4650002f32,
+        client_tracking_range: 16u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9606,6 +9753,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.3125f32, 0.3125f32],
         eye_height: 0f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9898,6 +10046,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.62f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -9954,6 +10103,7 @@ impl EntityType {
         }),
         dimension: [0.9f32, 3.5f32],
         eye_height: 2.9750001f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -10105,6 +10255,7 @@ impl EntityType {
         }),
         dimension: [0.7f32, 2.4f32],
         eye_height: 2.1f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -10127,6 +10278,7 @@ impl EntityType {
         loot_table: None,
         dimension: [0.3125f32, 0.3125f32],
         eye_height: 0.265625f32,
+        client_tracking_range: 4u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -10183,6 +10335,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 0.85f32],
         eye_height: 0.68f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -10274,6 +10427,7 @@ impl EntityType {
         }),
         dimension: [1.3964844f32, 1.4f32],
         eye_height: 1.19f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -10490,6 +10644,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.74f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -10581,6 +10736,7 @@ impl EntityType {
         }),
         dimension: [1.3964844f32, 1.6f32],
         eye_height: 1.52f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -10673,6 +10829,7 @@ impl EntityType {
         }),
         dimension: [0.875f32, 0.95f32],
         eye_height: 0.2751f32,
+        client_tracking_range: 10u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -10824,6 +10981,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.74f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
@@ -10976,6 +11134,7 @@ impl EntityType {
         }),
         dimension: [0.6f32, 1.95f32],
         eye_height: 1.79f32,
+        client_tracking_range: 8u8,
         spawn_restriction: SpawnRestriction {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,

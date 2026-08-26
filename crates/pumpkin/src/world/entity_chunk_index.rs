@@ -30,17 +30,18 @@ impl EntityChunkIndex {
         self.chunks.entry(chunk).or_default().insert(entity_id);
     }
 
-    pub fn update_if_present(&mut self, entity_id: i32, chunk: Vector2<i32>) {
+    pub fn update_if_present(&mut self, entity_id: i32, chunk: Vector2<i32>) -> bool {
         let Some(previous_chunk) = self.positions.get(&entity_id).copied() else {
-            return;
+            return false;
         };
         if previous_chunk == chunk {
-            return;
+            return false;
         }
 
         self.positions.insert(entity_id, chunk);
         self.remove_from_chunk(previous_chunk, entity_id);
         self.chunks.entry(chunk).or_default().insert(entity_id);
+        true
     }
 
     pub fn remove(&mut self, entity_id: i32) {
@@ -65,6 +66,15 @@ impl EntityChunkIndex {
                 .filter_map(|entity_id| self.entities_by_id.get(entity_id)?.upgrade())
                 .collect()
         })
+    }
+
+    pub fn entities_in_chunks(&self, chunks: &[Vector2<i32>]) -> Vec<Arc<dyn EntityBase>> {
+        chunks
+            .iter()
+            .filter_map(|chunk| self.chunks.get(chunk))
+            .flat_map(|entity_ids| entity_ids.iter())
+            .filter_map(|entity_id| self.entities_by_id.get(entity_id)?.upgrade())
+            .collect()
     }
 
     pub fn entity_by_id(&self, entity_id: i32) -> Option<Arc<dyn EntityBase>> {
@@ -94,8 +104,8 @@ mod tests {
 
         index.insert_membership(10, first_chunk);
         index.insert_membership(11, first_chunk);
-        index.update_if_present(10, second_chunk);
-        index.update_if_present(99, second_chunk);
+        assert!(index.update_if_present(10, second_chunk));
+        assert!(!index.update_if_present(99, second_chunk));
 
         assert_eq!(index.ids_in_chunks(&[first_chunk]), [11]);
         assert_eq!(index.ids_in_chunks(&[second_chunk]), [10]);
