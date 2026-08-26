@@ -1319,10 +1319,14 @@ impl Entity {
                 if get_section_cord(floor_x) != chunk_pos.x
                     || get_section_cord(floor_z) != chunk_pos.y
                 {
-                    self.chunk_pos.store(Vector2::new(
+                    let new_chunk_pos = Vector2::new(
                         get_section_cord(new_block_pos.x),
                         get_section_cord(new_block_pos.z),
-                    ));
+                    );
+                    self.chunk_pos.store(new_chunk_pos);
+                    self.world
+                        .load()
+                        .update_indexed_entity_chunk(self.entity_id, new_chunk_pos);
                 }
             }
         }

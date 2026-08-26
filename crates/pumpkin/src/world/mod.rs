@@ -18,6 +18,7 @@ use std::{
 use tracing::{debug, error, info, trace, warn};
 
 pub mod chunker;
+mod entity_chunk_index;
 pub mod explosion;
 pub mod loot;
 pub mod map;
@@ -252,6 +253,8 @@ pub struct World {
     /// A map of active entities within the world, keyed by their unique UUID.
     /// This does not include players.
     pub entities: ArcSwap<Vec<Arc<dyn EntityBase>>>,
+    /// Runtime entities grouped by their current chunk for tracking operations.
+    entity_chunk_index: std::sync::RwLock<entity_chunk_index::EntityChunkIndex>,
     /// The world's scoreboard, used for tracking scores, objectives, and display information.
     pub scoreboard: Mutex<Scoreboard>,
     /// The world's worldborder, defining the playable area and controlling its expansion or contraction.
@@ -383,6 +386,9 @@ impl World {
             level_info,
             players: ArcSwap::new(Arc::new(Vec::new())),
             entities: ArcSwap::new(Arc::new(Vec::new())),
+            entity_chunk_index: std::sync::RwLock::new(
+                entity_chunk_index::EntityChunkIndex::default(),
+            ),
             scoreboard: Mutex::new(Scoreboard::default()),
             worldborder: Mutex::new(Worldborder::new(0.0, 0.0, 5.999_996_8E7, 0, 5, 300)),
             level_time: Mutex::new(LevelTime::new()),
@@ -405,6 +411,53 @@ impl World {
             custom_data: std::sync::Mutex::new(custom_data),
             custom_block_entity_data: DashMap::new(),
         }
+    }
+
+    fn index_entity(&self, entity: &Arc<dyn EntityBase>) {
+        let position = entity.get_entity().pos.load();
+        let chunk = Vector2::new(
+            get_section_cord(position.x.floor() as i32),
+            get_section_cord(position.z.floor() as i32),
+        );
+        self.entity_chunk_index
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(entity, chunk);
+    }
+
+    pub(crate) fn update_indexed_entity_chunk(&self, entity_id: i32, chunk: Vector2<i32>) {
+        self.entity_chunk_index
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .update_if_present(entity_id, chunk);
+    }
+
+    fn unindex_entity(&self, entity_id: i32) {
+        self.entity_chunk_index
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(entity_id);
+    }
+
+    pub(crate) fn entity_ids_in_chunks(&self, chunks: &[Vector2<i32>]) -> Vec<i32> {
+        self.entity_chunk_index
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ids_in_chunks(chunks)
+    }
+
+    fn entities_in_chunk(&self, chunk: Vector2<i32>) -> Vec<Arc<dyn EntityBase>> {
+        self.entity_chunk_index
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entities_in_chunk(chunk)
+    }
+
+    fn indexed_entity_by_id(&self, entity_id: i32) -> Option<Arc<dyn EntityBase>> {
+        self.entity_chunk_index
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entity_by_id(entity_id)
     }
 
     pub fn update_active_chunks(self: &Arc<Self>) {
@@ -1276,6 +1329,7 @@ impl World {
         let server_for_entities = server.clone();
         let active_chunks = self.active_chunks.load();
         let level_for_entities = self.level.clone();
+        let world_for_entity_index = self.clone();
 
         let entity_future = async move {
             let t = tokio::time::Instant::now();
@@ -1313,6 +1367,7 @@ impl World {
                 let batch = entity_batch.to_vec();
                 let s_clone = server_for_entities.clone();
                 let p_cache = players_cache.clone();
+                let world = world_for_entity_index.clone();
 
                 tasks.spawn(async move {
                     for (entity, entity_chunk) in batch {
@@ -1322,6 +1377,15 @@ impl World {
                         let entity_inner = entity.get_entity();
                         let entity_pos = entity_inner.pos.load();
                         let entity_bb = entity_inner.bounding_box.load();
+                        let current_chunk = Vector2::new(
+                            get_section_cord(entity_pos.x.floor() as i32),
+                            get_section_cord(entity_pos.z.floor() as i32),
+                        );
+                        if current_chunk != entity_inner.chunk_pos.load() {
+                            entity_inner.chunk_pos.store(current_chunk);
+                            world
+                                .update_indexed_entity_chunk(entity_inner.entity_id, current_chunk);
+                        }
 
                         for (player, player_pos, player_bb, player_chunk) in p_cache.iter() {
                             if (player_chunk.x - entity_chunk.x).abs() <= 1
@@ -4362,6 +4426,9 @@ impl World {
                             new_entities.extend(entities_to_add.iter().cloned());
                             new_entities
                         });
+                        for entity in &entities_to_add {
+                            world.index_entity(entity);
+                        }
 
                         // Publish entities only after server lookup can resolve them. This
                         // mirrors vanilla's registration-before-pairing order.
@@ -4374,12 +4441,9 @@ impl World {
                     // The chunk's entities are already live (another watcher loaded
                     // them). Just send this player the spawn packets for the live
                     // entities currently in this chunk.
-                    for entity in world.entities.load().iter() {
-                        let base_entity = entity.get_entity();
-                        if base_entity.chunk_pos.load() == position {
-                            player.client.enqueue_spawn_packet(entity).await;
-                            player.try_restore_vehicle(entity).await;
-                        }
+                    for entity in world.entities_in_chunk(position) {
+                        player.client.enqueue_spawn_packet(&entity).await;
+                        player.try_restore_vehicle(&entity).await;
                     }
                 }
             }
@@ -4401,14 +4465,19 @@ impl World {
 
     /// Gets an entity by an entity id
     pub fn get_entity_by_id(&self, id: i32) -> Option<Arc<dyn EntityBase>> {
-        for entity in self.entities.load().iter() {
-            if entity.get_entity().entity_id == id {
-                return Some(entity.clone());
-            }
+        if let Some(entity) = self.indexed_entity_by_id(id) {
+            return Some(entity);
         }
         for player in self.players.load().iter() {
             if player.get_entity().entity_id == id {
                 return Some(player.clone() as Arc<dyn EntityBase>);
+            }
+        }
+        // Preserve lookup correctness during the short registration window before a newly
+        // inserted entity reaches the spatial index. Established entities use the O(1) path.
+        for entity in self.entities.load().iter() {
+            if entity.get_entity().entity_id == id {
+                return Some(entity.clone());
             }
         }
         None
@@ -4806,6 +4875,7 @@ impl World {
             new_entities.push(entity.clone());
             new_entities
         });
+        self.index_entity(entity);
     }
 
     pub async fn spawn_entity(self: &Arc<Self>, entity: Arc<dyn EntityBase>) {
@@ -4868,6 +4938,7 @@ impl World {
             new_entities.push(entity.clone());
             new_entities
         });
+        self.index_entity(&entity);
     }
 
     #[allow(clippy::unused_async)]
@@ -4883,6 +4954,7 @@ impl World {
         base_entity.removed.store(true, Ordering::Release);
 
         self.spawn_state.load().remove_entity(self, entity);
+        self.unindex_entity(base_entity.entity_id);
         self.entities.rcu(|current_entities| {
             let mut new_entities = (**current_entities).clone();
             new_entities.retain(|e| e.get_entity().entity_uuid != base_entity.entity_uuid);
@@ -4923,6 +4995,7 @@ impl World {
         });
 
         for entity in entities_to_remove {
+            self.unindex_entity(entity.get_entity().entity_id);
             self.save_entity(&entity).await;
             self.spawn_state.load().remove_entity(self, entity.as_ref());
         }
