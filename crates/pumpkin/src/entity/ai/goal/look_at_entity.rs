@@ -2,13 +2,11 @@ use super::{Controls, Goal};
 use crate::entity::ai::goal::GoalFuture;
 use crate::entity::ai::target_predicate::TargetPredicate;
 use crate::entity::mob::Mob;
-use crate::entity::predicate::EntityPredicate;
 use crate::entity::{EntityBase, player::Player};
 use pumpkin_data::entity::EntityType;
 use rand::RngExt;
 use std::sync::{Arc, Weak};
 
-#[expect(dead_code)]
 pub struct LookAtEntityGoal {
     goal_control: Controls,
     target: Option<Arc<dyn EntityBase>>,
@@ -58,20 +56,7 @@ impl LookAtEntityGoal {
     ) -> TargetPredicate {
         let mut target_predicate = TargetPredicate::create_non_attackable();
         target_predicate.base_max_distance = range as f64; // TODO
-        if target_type == &EntityType::PLAYER {
-            target_predicate.set_predicate(move |living_entity, _world| {
-                let mob_weak = mob_weak.clone();
-                async move {
-                    if let Some(mob_arc) = mob_weak.upgrade() {
-                        let predicate = EntityPredicate::Rides(mob_arc.get_entity());
-                        predicate.test(&living_entity.entity).await
-                    } else {
-                        // MobEntity is destroyed
-                        false
-                    }
-                }
-            });
-        }
+        let _ = (mob_weak, target_type);
         target_predicate
     }
 }
@@ -104,7 +89,22 @@ impl Goal for LookAtEntityGoal {
                     world.get_closest_entity(mob_pos, self.range.into(), Some(&[self.target_type]));
             }
 
-            self.target.is_some()
+            let Some(target) = self.target.as_ref() else {
+                return false;
+            };
+            let Some(living) = target.get_living_entity() else {
+                self.target = None;
+                return false;
+            };
+            if !self
+                .target_predicate
+                .test(&world, Some(mob), living, &mob_entity.sensing)
+                .await
+            {
+                self.target = None;
+                return false;
+            }
+            true
         })
     }
 

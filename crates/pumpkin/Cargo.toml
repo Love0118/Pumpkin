@@ -123,9 +123,15 @@ bitflags = { workspace = true }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 indexmap.workspace = true
+lru.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "block_entity_snapshot"
+harness = false
 
 [features]
 console-subscriber = ["dep:console-subscriber"]

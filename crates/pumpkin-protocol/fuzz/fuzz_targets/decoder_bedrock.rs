@@ -91,7 +91,7 @@ fuzz_target!(|data: &[u8]| {
         decoder.set_compression((threshold_raw as u32).try_into().unwrap());
     }
     // 1. Fuzz the Decoder (Framing/VarInts/Bitmasks)
-    let mut decoder_cursor = Cursor::new(stream_data.to_vec());
+    let mut decoder_cursor = Cursor::new(bytes::Bytes::copy_from_slice(stream_data));
     if let Ok(raw_packet) = decoder.get_game_packet(&mut decoder_cursor) {
         // If framed correctly, fuzz the internal payload
         fuzz_serverbound_packets(&raw_packet.payload);

@@ -34,10 +34,8 @@ impl BlockEntity for CalibratedSculkSensorBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            nbt.put_int(
-                "last_vibration_frequency",
-                *self.last_vibration_frequency.lock().await,
-            );
+            let frequency = *self.last_vibration_frequency.lock().await;
+            nbt.put_int("last_vibration_frequency", frequency);
         })
     }
 

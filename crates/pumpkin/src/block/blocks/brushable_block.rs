@@ -32,11 +32,9 @@ impl BrushableBlock {
         if let Some(be) = world.get_block_entity(pos)
             && let Some(brush_be) = be.as_any().downcast_ref::<BrushableBlockBlockEntity>()
         {
-            let mut hits = brush_be.hits.lock().await;
-            *hits += 1;
+            let (hits, item) = brush_be.apply_brush_hit().await;
 
-            if *hits >= 4 {
-                let item = brush_be.item.lock().await.take();
+            if hits >= 4 {
                 if let Some(item_stack) = item {
                     world.drop_stack(pos, item_stack).await;
                 }
@@ -59,7 +57,7 @@ impl BrushableBlock {
 
                 world.play_sound(sound, SoundCategory::Blocks, &pos.to_f64());
             } else {
-                props.dusted = (*hits as u8).min(3);
+                props.dusted = (hits as u8).min(3);
                 world
                     .set_block_state(pos, props.to_state_id(block), BlockFlags::NOTIFY_ALL)
                     .await;
@@ -95,7 +93,7 @@ impl BlockBehaviour for BrushableBlock {
         Box::pin(async move {
             if let Some(be) = args.world.get_block_entity(args.position)
                 && let Some(brush_be) = be.as_any().downcast_ref::<BrushableBlockBlockEntity>()
-                && let Some(contained) = brush_be.item.lock().await.take()
+                && let Some(contained) = brush_be.take_item().await
             {
                 args.world.drop_stack(args.position, contained).await;
             }

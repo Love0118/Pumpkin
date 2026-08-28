@@ -4,15 +4,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam::atomic::AtomicCell;
 
 use crate::entity::player::Player;
-use crate::entity::{Entity, EntityBase, EntityBaseFuture, living::LivingEntity};
+use crate::entity::{DamageContext, Entity, EntityBase, EntityBaseFuture, living::LivingEntity};
 use crate::server::Server;
 
-use pumpkin_data::damage::DamageType;
 use pumpkin_data::item_stack::ItemStack;
 
 use pumpkin_protocol::java::client::play::Metadata;
-
-use pumpkin_util::math::vector3::Vector3;
 
 use crate::entity::vehicle::vehicle::VehicleEntity;
 
@@ -93,14 +90,14 @@ impl EntityBase for BoatEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        amount: f32,
-        _damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        source: Option<&'a dyn EntityBase>,
-        _cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
-        Box::pin(async move { self.vehicle.damage_with_context(amount, source).await })
+        Box::pin(async move {
+            self.vehicle
+                .damage_with_context(context.amount(), context.direct_entity())
+                .await
+        })
     }
 
     fn interact<'a>(

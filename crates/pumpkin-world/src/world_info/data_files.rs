@@ -9,7 +9,15 @@ use pumpkin_nbt::{compound::NbtCompound, nbt_compress::read_gzip_compound_tag, t
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::persistence::atomic_write;
 use crate::world_info::{WorldGenSettings, WorldInfoError};
+
+fn write_gzip_file(path: &Path, root: NbtCompound) -> Result<(), WorldInfoError> {
+    atomic_write(path, |file| {
+        pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, BufWriter::new(file))
+            .map_err(|error| WorldInfoError::SerializationError(error.to_string()))
+    })
+}
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct DataFileRoot<T> {
@@ -158,7 +166,6 @@ pub fn read_weather(level_folder: &Path) -> WeatherData {
 pub fn write_weather(level_folder: &Path, data: &WeatherData) -> Result<(), WorldInfoError> {
     let dir = ensure_minecraft_data_dir(level_folder)?;
     let path = dir.join("weather.dat");
-    let file = File::create(&path)?;
     let mut data_comp = NbtCompound::new();
     data_comp.put_int("clear_weather_time", data.clear_weather_time);
     data_comp.put_int("rain_time", data.rain_time);
@@ -168,8 +175,7 @@ pub fn write_weather(level_folder: &Path, data: &WeatherData) -> Result<(), Worl
     let mut root = NbtCompound::new();
     root.put_int("DataVersion", data.data_version);
     root.put_compound("data", data_comp);
-    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, BufWriter::new(file))
-        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+    write_gzip_file(&path, root)
 }
 
 #[must_use]
@@ -325,7 +331,6 @@ pub fn write_world_gen_settings(
 ) -> Result<(), WorldInfoError> {
     let dir = ensure_minecraft_data_dir(level_folder)?;
     let path = dir.join("world_gen_settings.dat");
-    let file = File::create(&path)?;
     let mut inner = NbtCompound::new();
     inner.put_int("DataVersion", data_version);
     inner.put_long("seed", settings.seed);
@@ -369,8 +374,7 @@ pub fn write_world_gen_settings(
 
     let mut root = NbtCompound::new();
     root.put_compound("data", inner);
-    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, BufWriter::new(file))
-        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+    write_gzip_file(&path, root)
 }
 
 #[must_use]
@@ -447,10 +451,7 @@ pub fn write_game_rules(
     let path = dir.join("game_rules.dat");
 
     let compound = game_rules_to_nbt(rules, data_version);
-    let file = File::create(&path)?;
-
-    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(compound, file)
-        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+    write_gzip_file(&path, compound)
 }
 
 pub fn read_world_clocks(level_folder: &Path) -> WorldClocksData {
@@ -516,10 +517,7 @@ pub fn write_world_clocks(
     let mut root = NbtCompound::new();
     root.put_compound("data", inner);
 
-    let file = File::create(&path)?;
-
-    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, file)
-        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+    write_gzip_file(&path, root)
 }
 
 pub fn read_wandering_trader(level_folder: &Path) -> WanderingTraderData {
@@ -566,15 +564,13 @@ pub fn write_wandering_trader(
 ) -> Result<(), WorldInfoError> {
     let dir = ensure_minecraft_data_dir(level_folder)?;
     let path = dir.join("wandering_trader.dat");
-    let file = File::create(&path)?;
     let mut data_comp = NbtCompound::new();
     data_comp.put_int("spawn_delay", data.spawn_delay);
     data_comp.put_int("spawn_chance", data.spawn_chance);
     let mut root = NbtCompound::new();
     root.put_int("DataVersion", data.data_version);
     root.put_compound("data", data_comp);
-    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, BufWriter::new(file))
-        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+    write_gzip_file(&path, root)
 }
 
 pub fn write_custom_boss_events_stub(
@@ -591,9 +587,7 @@ pub fn write_custom_boss_events_stub(
     root.put_int("DataVersion", data_version);
     root.put_compound("data", NbtCompound::new());
 
-    let file = File::create(&path)?;
-    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, file)
-        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+    write_gzip_file(&path, root)
 }
 
 pub fn write_scheduled_events_stub(
@@ -612,9 +606,7 @@ pub fn write_scheduled_events_stub(
     root.put_int("DataVersion", data_version);
     root.put_compound("data", inner);
 
-    let file = File::create(&path)?;
-    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, file)
-        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+    write_gzip_file(&path, root)
 }
 
 pub fn write_random_sequences_stub(
@@ -634,9 +626,7 @@ pub fn write_random_sequences_stub(
     root.put_int("DataVersion", data_version);
     root.put_compound("data", inner);
 
-    let file = File::create(&path)?;
-    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, file)
-        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+    write_gzip_file(&path, root)
 }
 
 pub fn write_scoreboard_stub(level_folder: &Path, data_version: i32) -> Result<(), WorldInfoError> {
@@ -650,9 +640,7 @@ pub fn write_scoreboard_stub(level_folder: &Path, data_version: i32) -> Result<(
     root.put_int("DataVersion", data_version);
     root.put_compound("data", NbtCompound::new());
 
-    let file = File::create(&path)?;
-    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, file)
-        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+    write_gzip_file(&path, root)
 }
 
 pub fn write_stopwatches_stub(
@@ -671,7 +659,5 @@ pub fn write_stopwatches_stub(
     root.put_int("DataVersion", data_version);
     root.put_compound("data", inner);
 
-    let file = File::create(&path)?;
-    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, file)
-        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+    write_gzip_file(&path, root)
 }

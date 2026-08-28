@@ -47,12 +47,27 @@ impl TrackTargetGoal {
         self
     }
 
-    fn can_navigate_to_entity(&self, mob: &dyn Mob, _target: &LivingEntity) -> bool {
+    async fn can_navigate_to_entity(&self, mob: &dyn Mob, target: &LivingEntity) -> bool {
         let cooldown = to_goal_ticks(10 + mob.get_random().random_range(0..5));
         self.check_can_navigate_cooldown
             .store(cooldown, Ordering::Relaxed);
-        // TODO: after implementing path
-        false
+
+        let mob_entity = mob.get_mob_entity();
+        let mut navigator = {
+            let mut guard = mob_entity
+                .navigator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *guard)
+        };
+        let can_reach = navigator
+            .can_reach_target(&mob_entity.living_entity, target.entity.pos.load())
+            .await;
+        *mob_entity
+            .navigator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = navigator;
+        can_reach
     }
 
     fn remembers_visible_target(&self, has_line_of_sight: bool) -> bool {
@@ -80,13 +95,15 @@ impl TrackTargetGoal {
         let world = mob_entity.living_entity.entity.world.load();
 
         if !target_predicate
-            .test(&world, Some(&mob_entity.living_entity), target)
+            .test(&world, Some(mob), target, &mob_entity.sensing)
             .await
         {
             return false;
         }
 
-        // TODO: isInPositionTargetRange (isWithinHome in Java) check
+        if !mob_entity.is_in_position_target_range_pos(&target.entity.block_pos.load()) {
+            return false;
+        }
 
         if self.check_can_navigate {
             let cooldown = self
@@ -98,7 +115,7 @@ impl TrackTargetGoal {
             }
 
             if self.can_navigate_flag.load(Ordering::Relaxed) == UNSET {
-                let can_reach = self.can_navigate_to_entity(mob, target);
+                let can_reach = self.can_navigate_to_entity(mob, target).await;
                 self.can_navigate_flag.store(
                     if can_reach { CAN_TRACK } else { CANNOT_TRACK },
                     Ordering::Relaxed,
@@ -158,15 +175,10 @@ impl Goal for TrackTargetGoal {
             }
 
             if self.check_visibility {
-                let world = mob_entity.living_entity.entity.world.load();
-                let has_line_of_sight = world
-                    .raycast(
-                        mob_entity.living_entity.entity.get_eye_pos(),
-                        target.entity.get_eye_pos(),
-                        async |block_pos, world| world.get_block_state(block_pos).is_solid(),
-                    )
-                    .await
-                    .is_none();
+                let has_line_of_sight = mob_entity
+                    .sensing
+                    .has_line_of_sight(&mob_entity.living_entity.entity, &target.entity)
+                    .await;
 
                 if !self.remembers_visible_target(has_line_of_sight) {
                     return false;

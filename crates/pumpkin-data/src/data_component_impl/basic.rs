@@ -200,7 +200,7 @@ impl DataComponentImpl for LoreImpl {
         NbtTag::List(
             self.lines
                 .iter()
-                .map(|line| NbtTag::String(line.clone().get_text().into_boxed_str()))
+                .map(|line| NbtTag::String(line.clone().get_text().into()))
                 .collect(),
         )
     }

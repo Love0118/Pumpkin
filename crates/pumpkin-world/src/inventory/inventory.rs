@@ -70,18 +70,26 @@ pub trait Inventory: Send + Sync + Clearable {
         })
     }
 
+    /// Captures an owned inventory view before serialization starts.
+    fn snapshot_stacks(&self) -> InventoryFuture<'_, Vec<ItemStack>> {
+        Box::pin(async move {
+            let mut stacks = Vec::with_capacity(self.size());
+            for slot in 0..self.size() {
+                stacks.push(self.get_stack(slot).await);
+            }
+            stacks
+        })
+    }
+
     fn write_inventory_nbt<'a>(
         &'a self,
         nbt: &'a mut NbtCompound,
         include_empty: bool,
     ) -> InventoryFuture<'a, ()> {
         Box::pin(async move {
+            let stacks = self.snapshot_stacks().await;
             let mut slots = Vec::new();
-            let size = self.size();
-
-            for i in 0..size {
-                let stack = self.get_stack(i).await;
-
+            for (i, stack) in stacks.iter().enumerate() {
                 if !stack.is_empty() {
                     let mut item_compound = NbtCompound::new();
                     item_compound.put_byte("Slot", i as i8);

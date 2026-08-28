@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::entity::boss::ender_dragon::EnderDragonEntity;
 use crate::entity::boss::wither::WitherEntity;
+use crate::entity::decoration::leash_knot::LeashKnotEntity;
 use crate::entity::decoration::{
     armor_stand::ArmorStandEntity,
     display::{BlockDisplayEntity, ItemDisplayEntity, TextDisplayEntity},
@@ -110,6 +111,7 @@ use crate::entity::projectile::ender_pearl::EnderPearlEntity;
 use crate::entity::projectile::eye_of_ender::EyeOfEnder;
 use crate::entity::projectile::fireball::FireballEntity;
 use crate::entity::projectile::firework_rocket::FireworkRocketEntity;
+use crate::entity::projectile::fishing_bobber::FishingBobberEntity;
 use crate::entity::projectile::lingering_potion::LingeringPotionEntity;
 use crate::entity::projectile::llama_spit::LlamaSpitEntity;
 use crate::entity::projectile::shulker_bullet::ShulkerBulletEntity;
@@ -126,6 +128,36 @@ use crate::entity::{Entity, EntityBase, mob};
 use crate::world::World;
 use pumpkin_data::Block;
 use std::sync::atomic::AtomicBool;
+use tracing::error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactoryPolicy {
+    Explicit,
+    GenericEntity,
+    GenericLiving,
+    ExternalPlayer,
+}
+
+#[must_use]
+pub const fn factory_policy(entity_type: &EntityType) -> FactoryPolicy {
+    let id = entity_type.id;
+    if id == EntityType::CAMEL_HUSK.id
+        || id == EntityType::SULFUR_CUBE.id
+        || id == EntityType::ZOMBIE_NAUTILUS.id
+    {
+        FactoryPolicy::GenericLiving
+    } else if id == EntityType::PLAYER.id {
+        FactoryPolicy::ExternalPlayer
+    } else if id == EntityType::DRAGON_FIREBALL.id
+        || id == EntityType::EXPERIENCE_BOTTLE.id
+        || id == EntityType::MANNEQUIN.id
+        || id == EntityType::OMINOUS_ITEM_SPAWNER.id
+    {
+        FactoryPolicy::GenericEntity
+    } else {
+        FactoryPolicy::Explicit
+    }
+}
 
 #[expect(clippy::too_many_lines)]
 pub fn from_type(
@@ -306,6 +338,10 @@ pub fn from_type(
         id if id == EntityType::LINGERING_POTION.id => Arc::new(LingeringPotionEntity::new(entity)),
         id if id == EntityType::LLAMA_SPIT.id => Arc::new(LlamaSpitEntity::new(entity)),
         id if id == EntityType::EYE_OF_ENDER.id => Arc::new(EyeOfEnder::new(entity)),
+        id if id == EntityType::FISHING_BOBBER.id => Arc::new(FishingBobberEntity::orphan(entity)),
+        id if id == EntityType::LEASH_KNOT.id => {
+            Arc::new(LeashKnotEntity::new(entity, BlockPos::floored_v(position)))
+        }
         id if id == EntityType::ACACIA_BOAT.id
             || id == EntityType::ACACIA_CHEST_BOAT.id
             || id == EntityType::BIRCH_BOAT.id
@@ -329,14 +365,17 @@ pub fn from_type(
         {
             Arc::new(BoatEntity::new(entity))
         }
-        // Fallback Entity
-        _ => {
-            if entity_type.attributes.is_empty() {
+        _ => match factory_policy(entity_type) {
+            FactoryPolicy::GenericLiving => Arc::new(LivingEntity::new(entity)),
+            FactoryPolicy::GenericEntity | FactoryPolicy::ExternalPlayer => Arc::new(entity),
+            FactoryPolicy::Explicit => {
+                error!(
+                    "Entity type {} is marked explicit but has no runtime factory branch",
+                    entity_type.resource_name
+                );
                 Arc::new(entity)
-            } else {
-                Arc::new(LivingEntity::new(entity))
             }
-        }
+        },
     };
 
     mob
@@ -382,4 +421,91 @@ pub fn check_spawn_rules(
 
     // TODO
     true
+}
+
+#[cfg(test)]
+mod factory_ledger_tests {
+    use std::collections::HashSet;
+
+    use pumpkin_data::entity::{EntityType, entity_from_egg};
+
+    use super::{FactoryPolicy, factory_policy};
+
+    #[test]
+    fn entity_type_registry_has_26_2_shape_and_unique_keys() {
+        assert_eq!(EntityType::ALL.len(), 158);
+        let ids = EntityType::ALL
+            .iter()
+            .map(|entity_type| entity_type.id)
+            .collect::<HashSet<_>>();
+        let names = EntityType::ALL
+            .iter()
+            .map(|entity_type| entity_type.resource_name)
+            .collect::<HashSet<_>>();
+        assert_eq!(ids.len(), EntityType::ALL.len());
+        assert_eq!(names.len(), EntityType::ALL.len());
+    }
+
+    #[test]
+    fn spawn_egg_registry_has_88_unique_entity_targets() {
+        let targets = (u16::MIN..=u16::MAX)
+            .filter_map(entity_from_egg)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 88);
+        assert_eq!(
+            targets
+                .iter()
+                .map(|entity_type| entity_type.id)
+                .collect::<HashSet<_>>()
+                .len(),
+            targets.len()
+        );
+        assert!(targets.iter().all(|target| {
+            EntityType::ALL
+                .iter()
+                .any(|candidate| candidate.id == target.id)
+        }));
+    }
+
+    #[test]
+    fn incomplete_factory_policies_are_explicit_and_stable() {
+        let incomplete = EntityType::ALL
+            .iter()
+            .filter_map(|entity_type| {
+                let policy = factory_policy(entity_type);
+                (policy != FactoryPolicy::Explicit).then_some((entity_type.resource_name, policy))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            incomplete,
+            vec![
+                ("camel_husk", FactoryPolicy::GenericLiving),
+                ("dragon_fireball", FactoryPolicy::GenericEntity),
+                ("experience_bottle", FactoryPolicy::GenericEntity),
+                ("mannequin", FactoryPolicy::GenericEntity),
+                ("ominous_item_spawner", FactoryPolicy::GenericEntity),
+                ("player", FactoryPolicy::ExternalPlayer),
+                ("sulfur_cube", FactoryPolicy::GenericLiving),
+                ("zombie_nautilus", FactoryPolicy::GenericLiving),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_save_no_summon_special_types_are_declared() {
+        for (entity_type, summonable) in [
+            (&EntityType::PLAYER, false),
+            (&EntityType::FISHING_BOBBER, false),
+            (&EntityType::LEASH_KNOT, true),
+            (&EntityType::LIGHTNING_BOLT, true),
+        ] {
+            assert!(
+                !entity_type.saveable,
+                "{} must not save",
+                entity_type.resource_name
+            );
+            assert_eq!(entity_type.summonable, summonable);
+        }
+    }
 }

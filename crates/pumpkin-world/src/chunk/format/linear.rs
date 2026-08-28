@@ -1,25 +1,31 @@
 use std::collections::HashMap;
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, SeekFrom};
 use std::marker::PhantomData;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::chunk::format::anvil::{AnvilChunkFile, SingleChunkDataSerializer};
-use crate::chunk::io::{ChunkSerializer, LoadedData};
+use crate::chunk::io::{ChunkSerializer, LoadedData, decompression_output_limit};
 use crate::chunk::{ChunkReadingError, ChunkWritingError};
 use bytes::{Buf, BufMut, Bytes};
 use pumpkin_util::math::vector2::Vector2;
 use ruzstd::decoding::StreamingDecoder;
 use ruzstd::encoding::{CompressionLevel, compress_to_vec};
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tracing::{error, warn};
 use xxhash_rust::xxh64::xxh64;
+
+use crate::{
+    persistence::AsyncAtomicFile,
+    serialization_metrics::{self, SerializationStage},
+};
 
 use super::anvil::CHUNK_COUNT;
 
 /// The signature used as both header and footer.
 /// <https://gist.github.com/Aaron2550/5701519671253d4c6190bde6706f9f98>
 const SIGNATURE: [u8; 8] = u64::to_be_bytes(0xc3ff13183cca9d9a);
+const MAX_DECOMPRESSED_BUCKET_BYTES: usize = 256 * 1024 * 1024;
 
 /// Allowed grid sizes for v2 bucket subdivision.
 const VALID_GRID_SIZES: &[u8] = &[1, 2, 4, 8, 16, 32];
@@ -381,9 +387,30 @@ impl<S: SingleChunkDataSerializer> LinearV2File<S> {
         }
         bitmap
     }
+
+    fn decompress_bucket(
+        compressed: &[u8],
+        max_decompressed_bytes: usize,
+    ) -> Result<Vec<u8>, ChunkReadingError> {
+        let output_limit = decompression_output_limit(compressed.len(), max_decompressed_bytes)
+            .map_err(ChunkReadingError::IoError)?;
+        let decoder =
+            StreamingDecoder::new(compressed).map_err(|_| ChunkReadingError::RegionIsInvalid)?;
+        let mut decompressed = Vec::new();
+        decoder
+            .take(output_limit.saturating_add(1) as u64)
+            .read_to_end(&mut decompressed)
+            .map_err(ChunkReadingError::IoError)?;
+        if decompressed.len() > output_limit {
+            return Err(ChunkReadingError::RegionIsInvalid);
+        }
+        Ok(decompressed)
+    }
 }
 
 impl<S: SingleChunkDataSerializer + 'static> ChunkSerializer for LinearV2File<S> {
+    const PEAK_REGION_WORKING_BYTES: usize = 2 * MAX_DECOMPRESSED_BUCKET_BYTES;
+
     type Data = S;
     type WriteBackend = PathBuf;
     type ChunkConfig = ();
@@ -398,36 +425,11 @@ impl<S: SingleChunkDataSerializer + 'static> ChunkSerializer for LinearV2File<S>
     }
 
     async fn write(&self, path: &PathBuf) -> Result<(), std::io::Error> {
-        let temp_path = path.with_extension("tmp");
-        let file = tokio::fs::File::create(&temp_path).await?;
+        let file = AsyncAtomicFile::create(path.clone()).await?;
         let mut writer = BufWriter::new(file);
 
         let grid_size = self.grid_size;
         let bucket_count = Self::bucket_count(grid_size);
-        let chunks_data = self.chunks_data.clone();
-        let timestamps = self.timestamps;
-
-        let (bucket_entries, compressed_buckets) = tokio::task::spawn_blocking(move || {
-            let mut compressed_buckets: Vec<Box<[u8]>> = Vec::with_capacity(bucket_count);
-            let mut bucket_entries: Vec<BucketSizeEntry> = Vec::with_capacity(bucket_count);
-
-            for bucket_idx in 0..bucket_count {
-                let raw = Self::serialise_bucket(&chunks_data, &timestamps, bucket_idx, grid_size);
-                let compressed =
-                    compress_to_vec(raw.as_slice(), CompressionLevel::Fastest).into_boxed_slice();
-                let hash = xxh64(&compressed, 0);
-                bucket_entries.push(BucketSizeEntry {
-                    size: compressed.len() as u32,
-                    compression_level: 1,
-                    xxhash: hash,
-                });
-                compressed_buckets.push(compressed);
-            }
-            (bucket_entries, compressed_buckets)
-        })
-        .await
-        .map_err(std::io::Error::other)?;
-
         let newest_timestamp = self.timestamps.iter().copied().max().unwrap_or(0);
 
         let superblock = LinearV2Superblock {
@@ -445,20 +447,51 @@ impl<S: SingleChunkDataSerializer + 'static> ChunkSerializer for LinearV2File<S>
         writer.write_all(&bitmap.0).await?;
         writer.write_all(&features.to_bytes()).await?;
 
-        for entry in &bucket_entries {
-            writer.write_all(&entry.to_bytes()).await?;
-        }
+        let bucket_table_position = writer.stream_position().await?;
+        writer
+            .write_all(&vec![0; BucketSizeEntry::SIZE * bucket_count])
+            .await?;
 
-        for compressed in &compressed_buckets {
-            writer.write_all(compressed).await?;
+        let mut bucket_entries = Vec::with_capacity(bucket_count);
+        for bucket_idx in 0..bucket_count {
+            let raw =
+                Self::serialise_bucket(&self.chunks_data, &self.timestamps, bucket_idx, grid_size);
+            if raw.len() > MAX_DECOMPRESSED_BUCKET_BYTES {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "Linear bucket {bucket_idx} exceeds {MAX_DECOMPRESSED_BUCKET_BYTES} decompressed bytes"
+                    ),
+                ));
+            }
+            let compress_started = Instant::now();
+            let compressed = tokio::task::spawn_blocking(move || {
+                compress_to_vec(raw.as_slice(), CompressionLevel::Fastest)
+            })
+            .await
+            .map_err(std::io::Error::other)?;
+            serialization_metrics::record_duration(
+                SerializationStage::Compress,
+                compress_started.elapsed(),
+            );
+            serialization_metrics::record_compressed_bytes(compressed.len());
+            bucket_entries.push(BucketSizeEntry {
+                size: compressed.len() as u32,
+                compression_level: 1,
+                xxhash: xxh64(&compressed, 0),
+            });
+            writer.write_all(&compressed).await?;
         }
 
         writer.write_all(&SIGNATURE).await?;
         writer.flush().await?;
 
-        // Atomic rename so a crash during write cannot produce a torn file.
-        tokio::fs::rename(temp_path, path).await?;
-        Ok(())
+        writer.seek(SeekFrom::Start(bucket_table_position)).await?;
+        for entry in &bucket_entries {
+            writer.write_all(&entry.to_bytes()).await?;
+        }
+        writer.flush().await?;
+        writer.into_inner().commit().await
     }
 
     #[expect(clippy::large_stack_arrays)]
@@ -538,14 +571,8 @@ impl<S: SingleChunkDataSerializer + 'static> ChunkSerializer for LinearV2File<S>
             }
 
             let compressed_slice = &buf[..compressed_size];
-            let mut decompressed = Vec::new();
-            {
-                let mut decoder = StreamingDecoder::new(compressed_slice)
-                    .map_err(|_| ChunkReadingError::RegionIsInvalid)?;
-                decoder
-                    .read_to_end(&mut decompressed)
-                    .map_err(ChunkReadingError::IoError)?
-            };
+            let decompressed =
+                Self::decompress_bucket(compressed_slice, MAX_DECOMPRESSED_BUCKET_BYTES)?;
             buf.advance(compressed_size);
 
             let mut bucket_buf: Bytes = decompressed.into();
@@ -579,6 +606,7 @@ impl<S: SingleChunkDataSerializer + 'static> ChunkSerializer for LinearV2File<S>
             .to_bytes()
             .await
             .map_err(|err| ChunkWritingError::ChunkSerializingError(err.to_string()))?;
+        serialization_metrics::record_snapshot_bytes(chunk_raw.len());
 
         self.timestamps[index] = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -625,7 +653,40 @@ impl<S: SingleChunkDataSerializer + 'static> ChunkSerializer for LinearV2File<S>
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+
+    use tempfile::tempdir;
+
     use super::*;
+    use crate::chunk::ChunkSerializingError;
+    use crate::chunk::io::Dirtiable;
+
+    struct MockChunk;
+
+    impl Dirtiable for MockChunk {
+        fn is_dirty(&self) -> bool {
+            false
+        }
+
+        fn mark_dirty(&self, _dirty: bool) {}
+    }
+
+    impl SingleChunkDataSerializer for MockChunk {
+        fn to_bytes(
+            &self,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<Bytes, ChunkSerializingError>> + Send + '_>>
+        {
+            Box::pin(async { unreachable!() })
+        }
+
+        fn from_bytes(_bytes: &Bytes, _pos: Vector2<i32>) -> Result<Self, ChunkReadingError> {
+            Ok(Self)
+        }
+
+        fn position(&self) -> (i32, i32) {
+            (0, 0)
+        }
+    }
 
     // Helper: build a tiny chunk payload.
     fn fake_nbt(seed: u8) -> Bytes {
@@ -776,5 +837,101 @@ mod tests {
         let mut b: Bytes = buf.into();
         let decoded = BucketChunkEntry::read_from(&mut b).unwrap();
         assert!(decoded.data.is_none());
+    }
+
+    #[test]
+    fn decompressed_bucket_limit_rejects_overflow() {
+        let compressed = compress_to_vec(&[7u8; 129][..], CompressionLevel::Fastest);
+        assert!(LinearV2File::<MockChunk>::decompress_bucket(&compressed, 128).is_err());
+    }
+
+    #[test]
+    fn decompressed_bucket_rejects_hostile_compression_ratio() {
+        let raw = vec![0; 1024 * 1024];
+        let compressed = compress_to_vec(&raw[..], CompressionLevel::Fastest);
+        assert!(LinearV2File::<MockChunk>::decompress_bucket(&compressed, raw.len()).is_err());
+    }
+
+    #[test]
+    fn decompressed_bucket_accepts_legitimate_payload_at_test_limit() {
+        let mut state = 0x1234_5678_u32;
+        let raw = (0..1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let compressed = compress_to_vec(&raw[..], CompressionLevel::Fastest);
+        assert_eq!(
+            LinearV2File::<MockChunk>::decompress_bucket(&compressed, raw.len()).unwrap(),
+            raw
+        );
+    }
+
+    #[tokio::test]
+    async fn streamed_bucket_write_round_trips_header_and_payload() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("r.0.0.linear");
+        let mut region = LinearV2File::<MockChunk>::default();
+        region.grid_size = 4;
+        region.timestamps[0] = 42;
+        region.chunks_data[0] = Some(fake_nbt(0xAB));
+
+        region.write(&path).await.unwrap();
+
+        let raw = tokio::fs::read(path).await.unwrap();
+        let decoded = LinearV2File::<MockChunk>::read(Bytes::from(raw)).unwrap();
+        assert_eq!(decoded.timestamps[0], 42);
+        assert_eq!(decoded.chunks_data[0].as_deref(), Some(&[0xAB; 64][..]));
+    }
+
+    #[tokio::test]
+    async fn repeated_atomic_replacement_keeps_latest_region_valid() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("r.0.0.linear");
+        let mut region = LinearV2File::<MockChunk>::default();
+        region.grid_size = 4;
+
+        for generation in 1..=32u8 {
+            region.timestamps[0] = u64::from(generation);
+            region.chunks_data[0] = Some(fake_nbt(generation));
+            region.write(&path).await.unwrap();
+
+            let raw = tokio::fs::read(&path).await.unwrap();
+            region = LinearV2File::<MockChunk>::read(Bytes::from(raw)).unwrap();
+            assert_eq!(region.timestamps[0], u64::from(generation));
+            assert_eq!(
+                region.chunks_data[0].as_deref(),
+                Some(vec![generation; 64].as_slice())
+            );
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupted_bucket_is_rejected_without_losing_other_buckets() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("r.0.0.linear");
+        let mut region = LinearV2File::<MockChunk>::default();
+        region.grid_size = 4;
+        region.timestamps[0] = 11;
+        region.chunks_data[0] = Some(fake_nbt(0x11));
+        region.timestamps[16] = 22;
+        region.chunks_data[16] = Some(fake_nbt(0x22));
+        region.write(&path).await.unwrap();
+
+        let mut raw = tokio::fs::read(&path).await.unwrap();
+        let bucket_data_offset = LinearV2Superblock::SIZE
+            + ChunkBitmap::SIZE
+            + NbtFeatures::empty().to_bytes().len()
+            + BucketSizeEntry::SIZE * LinearV2File::<MockChunk>::bucket_count(4);
+        raw[bucket_data_offset] ^= 0xFF;
+
+        let decoded = LinearV2File::<MockChunk>::read(Bytes::from(raw)).unwrap();
+        assert!(decoded.chunks_data[0].is_none());
+        assert_eq!(decoded.timestamps[16], 22);
+        assert_eq!(decoded.chunks_data[16].as_deref(), Some(&[0x22; 64][..]));
     }
 }

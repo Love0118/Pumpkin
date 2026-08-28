@@ -3,7 +3,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI32, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -31,14 +31,37 @@ use super::BlockEntity;
 
 pub struct JigsawBlockEntity {
     pub position: BlockPos,
-    pub name: Mutex<String>,
-    pub target: Mutex<String>,
-    pub pool: Mutex<String>,
-    pub final_state: Mutex<String>,
-    pub joint: Mutex<JigsawJointType>,
-    pub selection_priority: AtomicI32,
-    pub placement_priority: AtomicI32,
+    state: Mutex<JigsawState>,
     pub dirty: AtomicBool,
+}
+
+#[derive(Clone)]
+struct JigsawState {
+    name: String,
+    target: String,
+    pool: String,
+    final_state: String,
+    joint: JigsawJointType,
+    selection_priority: i32,
+    placement_priority: i32,
+}
+
+impl JigsawState {
+    fn write_nbt(&self, nbt: &mut NbtCompound) {
+        nbt.put_string(JigsawBlockEntity::NAME, self.name.clone());
+        nbt.put_string(JigsawBlockEntity::TARGET, self.target.clone());
+        nbt.put_string(JigsawBlockEntity::POOL, self.pool.clone());
+        nbt.put_string(JigsawBlockEntity::FINAL_STATE, self.final_state.clone());
+        nbt.put_string(JigsawBlockEntity::JOINT, self.joint.as_str());
+        nbt.put_int(
+            JigsawBlockEntity::PLACEMENT_PRIORITY,
+            self.placement_priority,
+        );
+        nbt.put_int(
+            JigsawBlockEntity::SELECTION_PRIORITY,
+            self.selection_priority,
+        );
+    }
 }
 
 impl JigsawBlockEntity {
@@ -59,13 +82,15 @@ impl JigsawBlockEntity {
     pub fn new(position: BlockPos) -> Self {
         Self {
             position,
-            name: Mutex::new(Self::EMPTY_ID.to_string()),
-            target: Mutex::new(Self::EMPTY_ID.to_string()),
-            pool: Mutex::new(Self::EMPTY_ID.to_string()),
-            final_state: Mutex::new(Self::DEFAULT_FINAL_STATE.to_string()),
-            joint: Mutex::new(JigsawJointType::Rollable),
-            selection_priority: AtomicI32::new(Self::DEFAULT_SELECTION_PRIORITY),
-            placement_priority: AtomicI32::new(Self::DEFAULT_PLACEMENT_PRIORITY),
+            state: Mutex::new(JigsawState {
+                name: Self::EMPTY_ID.to_string(),
+                target: Self::EMPTY_ID.to_string(),
+                pool: Self::EMPTY_ID.to_string(),
+                final_state: Self::DEFAULT_FINAL_STATE.to_string(),
+                joint: JigsawJointType::Rollable,
+                selection_priority: Self::DEFAULT_SELECTION_PRIORITY,
+                placement_priority: Self::DEFAULT_PLACEMENT_PRIORITY,
+            }),
             dirty: AtomicBool::new(false),
         }
     }
@@ -81,8 +106,7 @@ impl JigsawBlockEntity {
     }
 
     pub async fn generate(&self, world: &Arc<World>, levels: i32, keep_jigsaws: bool) {
-        let pool = self.pool.lock().await.clone();
-        let target = self.target.lock().await.clone();
+        let state = self.state.lock().await.clone();
 
         let block_state = world.get_block_state(&self.position);
         let props =
@@ -105,8 +129,8 @@ impl JigsawBlockEntity {
 
             JigsawPlacement::add_pieces(
                 &mut context,
-                &pool,
-                Some(&target),
+                &state.pool,
+                Some(&state.target),
                 levels,
                 position,
                 false,
@@ -121,6 +145,65 @@ impl JigsawBlockEntity {
         if let Some(structure) = structure {
             self.place_structure(world, structure, keep_jigsaws).await;
         }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the atomic vanilla jigsaw configuration contains these seven protocol fields"
+    )]
+    pub async fn update_configuration(
+        &self,
+        name: String,
+        target: String,
+        pool: String,
+        final_state: String,
+        joint: JigsawJointType,
+        selection_priority: i32,
+        placement_priority: i32,
+    ) {
+        *self.state.lock().await = JigsawState {
+            name,
+            target,
+            pool,
+            final_state,
+            joint,
+            selection_priority,
+            placement_priority,
+        };
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    pub fn try_name(&self) -> Option<String> {
+        self.state.try_lock().ok().map(|state| state.name.clone())
+    }
+
+    pub fn try_target(&self) -> Option<String> {
+        self.state.try_lock().ok().map(|state| state.target.clone())
+    }
+
+    pub fn try_pool(&self) -> Option<String> {
+        self.state.try_lock().ok().map(|state| state.pool.clone())
+    }
+
+    pub fn try_final_state(&self) -> Option<String> {
+        self.state
+            .try_lock()
+            .ok()
+            .map(|state| state.final_state.clone())
+    }
+
+    pub fn try_selection_priority(&self) -> Option<i32> {
+        self.state
+            .try_lock()
+            .ok()
+            .map(|state| state.selection_priority)
+    }
+
+    pub fn try_placement_priority(&self) -> Option<i32> {
+        self.state
+            .try_lock()
+            .ok()
+            .map(|state| state.placement_priority)
     }
 
     async fn place_structure(
@@ -165,48 +248,35 @@ impl BlockEntity for JigsawBlockEntity {
     where
         Self: Sized,
     {
-        let name = Mutex::new(
-            nbt.get_string(Self::NAME)
-                .unwrap_or(Self::EMPTY_ID)
-                .to_string(),
-        );
-        let target = Mutex::new(
-            nbt.get_string(Self::TARGET)
-                .unwrap_or(Self::EMPTY_ID)
-                .to_string(),
-        );
-        let pool = Mutex::new(
-            nbt.get_string(Self::POOL)
-                .unwrap_or(Self::EMPTY_ID)
-                .to_string(),
-        );
-        let final_state = Mutex::new(
-            nbt.get_string(Self::FINAL_STATE)
-                .unwrap_or(Self::DEFAULT_FINAL_STATE)
-                .to_string(),
-        );
-        let joint = Mutex::new(
-            nbt.get_string(Self::JOINT)
-                .map_or(JigsawJointType::Rollable, JigsawJointType::from_str),
-        );
-        let selection_priority = AtomicI32::new(
-            nbt.get_int(Self::SELECTION_PRIORITY)
-                .unwrap_or(Self::DEFAULT_SELECTION_PRIORITY),
-        );
-        let placement_priority = AtomicI32::new(
-            nbt.get_int(Self::PLACEMENT_PRIORITY)
-                .unwrap_or(Self::DEFAULT_PLACEMENT_PRIORITY),
-        );
-
         Self {
             position,
-            name,
-            target,
-            pool,
-            final_state,
-            joint,
-            selection_priority,
-            placement_priority,
+            state: Mutex::new(JigsawState {
+                name: nbt
+                    .get_string(Self::NAME)
+                    .unwrap_or(Self::EMPTY_ID)
+                    .to_string(),
+                target: nbt
+                    .get_string(Self::TARGET)
+                    .unwrap_or(Self::EMPTY_ID)
+                    .to_string(),
+                pool: nbt
+                    .get_string(Self::POOL)
+                    .unwrap_or(Self::EMPTY_ID)
+                    .to_string(),
+                final_state: nbt
+                    .get_string(Self::FINAL_STATE)
+                    .unwrap_or(Self::DEFAULT_FINAL_STATE)
+                    .to_string(),
+                joint: nbt
+                    .get_string(Self::JOINT)
+                    .map_or(JigsawJointType::Rollable, JigsawJointType::from_str),
+                selection_priority: nbt
+                    .get_int(Self::SELECTION_PRIORITY)
+                    .unwrap_or(Self::DEFAULT_SELECTION_PRIORITY),
+                placement_priority: nbt
+                    .get_int(Self::PLACEMENT_PRIORITY)
+                    .unwrap_or(Self::DEFAULT_PLACEMENT_PRIORITY),
+            }),
             dirty: AtomicBool::new(false),
         }
     }
@@ -216,39 +286,14 @@ impl BlockEntity for JigsawBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            nbt.put_string(Self::NAME, self.name.lock().await.clone());
-            nbt.put_string(Self::TARGET, self.target.lock().await.clone());
-            nbt.put_string(Self::POOL, self.pool.lock().await.clone());
-            nbt.put_string(Self::FINAL_STATE, self.final_state.lock().await.clone());
-            let joint = *self.joint.lock().await;
-            nbt.put_string(Self::JOINT, joint.as_str().to_string());
-            nbt.put_int(
-                Self::PLACEMENT_PRIORITY,
-                self.placement_priority.load(Ordering::SeqCst),
-            );
-            nbt.put_int(
-                Self::SELECTION_PRIORITY,
-                self.selection_priority.load(Ordering::SeqCst),
-            );
+            self.state.lock().await.clone().write_nbt(nbt);
         })
     }
 
     fn chunk_data_nbt(&self) -> Option<NbtCompound> {
+        let state = self.state.try_lock().ok()?.clone();
         let mut nbt = NbtCompound::new();
-        nbt.put_string(Self::NAME, self.name.try_lock().ok()?.clone());
-        nbt.put_string(Self::TARGET, self.target.try_lock().ok()?.clone());
-        nbt.put_string(Self::POOL, self.pool.try_lock().ok()?.clone());
-        nbt.put_string(Self::FINAL_STATE, self.final_state.try_lock().ok()?.clone());
-        let joint = *self.joint.try_lock().ok()?;
-        nbt.put_string(Self::JOINT, joint.as_str().to_string());
-        nbt.put_int(
-            Self::PLACEMENT_PRIORITY,
-            self.placement_priority.load(Ordering::SeqCst),
-        );
-        nbt.put_int(
-            Self::SELECTION_PRIORITY,
-            self.selection_priority.load(Ordering::SeqCst),
-        );
+        state.write_nbt(&mut nbt);
         Some(nbt)
     }
 

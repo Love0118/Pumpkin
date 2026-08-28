@@ -16,9 +16,9 @@ use crate::entity::{
     Entity, EntityBase, EntityBaseFuture, NbtFuture,
     ai::goal::{
         active_target::ActiveTargetGoal, avoid_entity::AvoidEntityGoal, breed::BreedGoal,
-        escape_danger::EscapeDangerGoal, follow_parent::FollowParentGoal,
-        look_around::RandomLookAroundGoal, look_at_entity::LookAtEntityGoal, swim::SwimGoal,
-        tempt::TemptGoal, wander_around::WanderAroundGoal,
+        follow_parent::FollowParentGoal, look_around::RandomLookAroundGoal,
+        look_at_entity::LookAtEntityGoal, swim::SwimGoal, tempt::TemptGoal,
+        wander_around::WanderAroundGoal,
     },
     mob::{Mob, MobEntity},
     passive::animal::Animal,
@@ -57,8 +57,6 @@ impl OcelotEntity {
 
             // Goal 1: FloatGoal (SwimGoal)
             goal_selector.add_goal(1, Box::new(SwimGoal::default()));
-            // Goal 1: PanicGoal (EscapeDangerGoal)
-            goal_selector.add_goal(1, EscapeDangerGoal::new(1.5));
             // Goal 3: OcelotTemptGoal
             goal_selector.add_goal(3, Box::new(TemptGoal::new(0.6, TEMPT_ITEMS)));
             // Goal 4: OcelotAvoidEntityGoal (when not trusting)

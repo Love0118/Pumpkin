@@ -419,7 +419,7 @@ impl TextComponentBase {
             && self.extra.is_empty()
             && let TextContent::Text { text } = &*self.content
         {
-            pumpkin_nbt::tag::NbtTag::String(text.to_string().into_boxed_str())
+            pumpkin_nbt::tag::NbtTag::String(text.to_string().into())
         } else {
             pumpkin_nbt::tag::NbtTag::Compound(self.to_nbt_compound_for_version(version))
         }

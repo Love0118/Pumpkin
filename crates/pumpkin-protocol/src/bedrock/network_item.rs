@@ -111,7 +111,10 @@ impl NetworkItemDescriptor {
         } else {
             (-1i16).write(&mut buf)?;
             (1i8).write(&mut buf)?;
-            self.nbt_data.clone().write_to_writer_bedrock(&mut buf)?;
+            self.nbt_data
+                .clone()
+                .write_to_writer_bedrock(&mut buf)
+                .map_err(Error::other)?;
         }
         write_user_data_strings(&mut buf, &self.place_on_blocks)?;
         write_user_data_strings(&mut buf, &self.destroy_blocks)?;

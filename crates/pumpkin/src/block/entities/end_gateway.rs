@@ -6,9 +6,28 @@ use tokio::sync::Mutex;
 
 pub struct EndGatewayBlockEntity {
     pub position: BlockPos,
-    pub age: Mutex<i64>,
-    pub exact_teleport: Mutex<bool>,
-    pub exit_portal: Mutex<Option<BlockPos>>,
+    state: Mutex<EndGatewayState>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct EndGatewayState {
+    age: i64,
+    exact_teleport: bool,
+    exit_portal: Option<BlockPos>,
+}
+
+impl EndGatewayState {
+    fn write_nbt(self, nbt: &mut NbtCompound) {
+        nbt.put_long("Age", self.age);
+        nbt.put_bool("ExactTeleport", self.exact_teleport);
+        if let Some(exit) = self.exit_portal {
+            let mut exit_nbt = NbtCompound::new();
+            exit_nbt.put_int("X", exit.0.x);
+            exit_nbt.put_int("Y", exit.0.y);
+            exit_nbt.put_int("Z", exit.0.z);
+            nbt.put_compound("ExitPortal", exit_nbt);
+        }
+    }
 }
 
 impl BlockEntity for EndGatewayBlockEntity {
@@ -35,9 +54,11 @@ impl BlockEntity for EndGatewayBlockEntity {
         });
         Self {
             position,
-            age: Mutex::new(age),
-            exact_teleport: Mutex::new(exact_teleport),
-            exit_portal: Mutex::new(exit_portal),
+            state: Mutex::new(EndGatewayState {
+                age,
+                exact_teleport,
+                exit_portal,
+            }),
         }
     }
 
@@ -46,31 +67,13 @@ impl BlockEntity for EndGatewayBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            nbt.put_long("Age", *self.age.lock().await);
-            nbt.put_bool("ExactTeleport", *self.exact_teleport.lock().await);
-            if let Some(exit) = self.exit_portal.lock().await.as_ref() {
-                let mut exit_nbt = NbtCompound::new();
-                exit_nbt.put_int("X", exit.0.x);
-                exit_nbt.put_int("Y", exit.0.y);
-                exit_nbt.put_int("Z", exit.0.z);
-                nbt.put_compound("ExitPortal", exit_nbt);
-            }
+            (*self.state.lock().await).write_nbt(nbt);
         })
     }
 
     fn chunk_data_nbt(&self) -> Option<NbtCompound> {
         let mut nbt = NbtCompound::new();
-        nbt.put_long("Age", *self.age.try_lock().ok()?);
-        nbt.put_bool("ExactTeleport", *self.exact_teleport.try_lock().ok()?);
-        if let Ok(exit) = self.exit_portal.try_lock()
-            && let Some(ref exit) = *exit
-        {
-            let mut exit_nbt = NbtCompound::new();
-            exit_nbt.put_int("X", exit.0.x);
-            exit_nbt.put_int("Y", exit.0.y);
-            exit_nbt.put_int("Z", exit.0.z);
-            nbt.put_compound("ExitPortal", exit_nbt);
-        }
+        (*self.state.try_lock().ok()?).write_nbt(&mut nbt);
         Some(nbt)
     }
 
@@ -85,9 +88,15 @@ impl EndGatewayBlockEntity {
     pub fn new(position: BlockPos) -> Self {
         Self {
             position,
-            age: Mutex::new(0),
-            exact_teleport: Mutex::new(false),
-            exit_portal: Mutex::new(None),
+            state: Mutex::new(EndGatewayState::default()),
         }
+    }
+
+    pub fn try_age(&self) -> Option<i64> {
+        self.state.try_lock().ok().map(|state| state.age)
+    }
+
+    pub fn try_exact_teleport(&self) -> Option<bool> {
+        self.state.try_lock().ok().map(|state| state.exact_teleport)
     }
 }

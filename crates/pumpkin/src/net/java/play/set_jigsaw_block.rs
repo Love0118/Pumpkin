@@ -22,18 +22,17 @@ impl JavaClient {
                 return;
             };
 
-            *jigsaw_block.name.lock().await = jigsaw.name.to_string();
-            *jigsaw_block.target.lock().await = jigsaw.target.to_string();
-            *jigsaw_block.pool.lock().await = jigsaw.pool.to_string();
-            *jigsaw_block.final_state.lock().await = jigsaw.final_state.to_string();
-            *jigsaw_block.joint.lock().await = JigsawJointType::from_str(jigsaw.joint);
             jigsaw_block
-                .selection_priority
-                .store(jigsaw.selection_priority.0, Ordering::SeqCst);
-            jigsaw_block
-                .placement_priority
-                .store(jigsaw.placement_priority.0, Ordering::SeqCst);
-            jigsaw_block.dirty.store(true, Ordering::Relaxed);
+                .update_configuration(
+                    jigsaw.name.to_string(),
+                    jigsaw.target.to_string(),
+                    jigsaw.pool.to_string(),
+                    jigsaw.final_state.to_string(),
+                    JigsawJointType::from_str(jigsaw.joint),
+                    jigsaw.selection_priority.0,
+                    jigsaw.placement_priority.0,
+                )
+                .await;
 
             player.world().update_block_entity(&block_entity);
         }

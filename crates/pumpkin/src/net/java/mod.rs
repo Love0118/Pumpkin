@@ -4,12 +4,13 @@ use pumpkin_protocol::java::client::play::{
 };
 use pumpkin_world::level::SyncChunk;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{io::Write, sync::Arc};
 
 use bytes::Bytes;
 use crossbeam::atomic::AtomicCell;
+use futures::{StreamExt, stream};
 use pumpkin_data::translation;
 use pumpkin_protocol::java::server::play::{
     SAttack, SBlockEntityTagQuery, SBundleItemSelected, SChangeDifficulty, SChangeGameMode,
@@ -30,13 +31,12 @@ use pumpkin_protocol::java::server::play::{
 use pumpkin_protocol::packet::MultiVersionJavaPacket;
 use pumpkin_protocol::{
     ClientPacket, ConnectionState, PacketDecodeError, RawPacket, ServerPacket,
-    codec::var_int::VarInt,
     java::{
         client::{config::CConfigDisconnect, login::CLoginDisconnect},
         packet_decoder::TCPNetworkDecoder,
         packet_encoder::TCPNetworkEncoder,
     },
-    ser::{NetworkWriteExt, WritingError},
+    ser::WritingError,
 };
 use pumpkin_util::text::TextComponent;
 use pumpkin_util::version::JavaMinecraftVersion;
@@ -46,7 +46,7 @@ use tokio::{
     sync::oneshot,
 };
 use tokio::{
-    sync::mpsc::{Receiver, Sender, error::TryRecvError},
+    sync::mpsc::{Receiver, Sender},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -65,6 +65,10 @@ use arc_swap::ArcSwap;
 use pending::PendingConnection;
 
 use crate::entity::player::Player;
+use crate::net::outbound::{
+    ByteBudgetError, OutboundByteBudget, OutboundBytePermit, PriorityBurst, StatePacketKind,
+    StateRecoveryKey, StateRecoveryQueue, record_outbound_drop, record_outbound_resnapshot,
+};
 use crate::net::{GameProfile, PacketHandlerResult, PacketRateLimiter, PlayerConfig};
 use crate::plugin::api::events::world::chunk_send::ChunkSend;
 use crate::plugin::player::player_custom_payload::PlayerCustomPayloadEvent;
@@ -99,6 +103,10 @@ pub struct JavaClient {
     outgoing_packet_priority_send: Sender<OutgoingPacket>,
     /// A high-priority queue of serialized packets to send to the network.
     outgoing_packet_priority_recv: Option<Receiver<OutgoingPacket>>,
+    /// Hard retained-byte limit shared by both outgoing queues.
+    outgoing_byte_budget: OutboundByteBudget,
+    state_recovery: Arc<StateRecoveryQueue>,
+    state_recovery_sequence: AtomicU64,
     /// The packet encoder for outgoing packets.
     network_writer: std::sync::Mutex<Option<TCPNetworkEncoder<BufWriter<OwnedWriteHalf>>>>,
     /// The packet decoder for incoming packets.
@@ -129,22 +137,48 @@ pub enum OutgoingPacketType {
 struct OutgoingPacket {
     data: Bytes,
     completion: Option<oneshot::Sender<()>>,
+    _budget: OutboundBytePermit,
 }
 
 impl OutgoingPacket {
-    const fn normal(data: Bytes) -> Self {
+    const fn normal(data: Bytes, budget: OutboundBytePermit) -> Self {
         Self {
             data,
             completion: None,
+            _budget: budget,
         }
     }
 
-    const fn high_priority(data: Bytes, completion: oneshot::Sender<()>) -> Self {
+    const fn high_priority(
+        data: Bytes,
+        completion: oneshot::Sender<()>,
+        budget: OutboundBytePermit,
+    ) -> Self {
         Self {
             data,
             completion: Some(completion),
+            _budget: budget,
         }
     }
+}
+
+struct EncodedJavaChunk {
+    chunk: Bytes,
+    light: Option<Bytes>,
+}
+
+fn encode_java_chunk(
+    chunk: &SyncChunk,
+    version: JavaMinecraftVersion,
+) -> Result<EncodedJavaChunk, WritingError> {
+    let light = if version >= JavaMinecraftVersion::V_1_14 && version < JavaMinecraftVersion::V_1_18
+    {
+        Some(CLightUpdate::from_chunk(chunk, version)?.serialize_packet(&version)?)
+    } else {
+        None
+    };
+    let chunk = CChunkData(chunk).serialize_packet(&version)?;
+    Ok(EncodedJavaChunk { chunk, light })
 }
 
 impl JavaClient {
@@ -170,6 +204,9 @@ impl JavaClient {
             outgoing_packet_queue_recv: Some(recv),
             outgoing_packet_priority_send: priority_send,
             outgoing_packet_priority_recv: Some(priority_recv),
+            outgoing_byte_budget: OutboundByteBudget::default(),
+            state_recovery: Arc::new(StateRecoveryQueue::default()),
+            state_recovery_sequence: AtomicU64::new(0),
             version: pending.version,
             network_writer: std::sync::Mutex::new(Some(pending.network_writer)),
             network_reader: std::sync::Mutex::new(Some(pending.network_reader)),
@@ -344,53 +381,70 @@ impl JavaClient {
             return;
         };
 
-        if self.version.load() >= JavaMinecraftVersion::V_1_20_2 {
-            self.send_packet(&CChunkBatchStart).await;
-        }
+        let mut valid_chunks = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             let mut event = ChunkSend::new(player.world(), chunk.clone());
             server.plugin_manager.fire(&server, &mut event).await;
-            if event.cancelled {
-                continue;
-            }
-
-            let mut buf = Vec::new();
-            let version = self.version.load();
-            if let Err(err) = buf.write_var_int(&VarInt(CChunkData::to_id(version))) {
-                error!("Failed to write chunk data id: {err:?}");
-                continue;
-            }
-            if let Err(err) = CChunkData(chunk).write_packet_data(&mut buf, &version) {
-                error!("Failed to write chunk data: {err:?}");
-                continue;
-            }
-            self.send_packet_now_data(buf.into()).await;
-
-            if version >= JavaMinecraftVersion::V_1_14 && version < JavaMinecraftVersion::V_1_18 {
-                match CLightUpdate::from_chunk(chunk, version) {
-                    Ok(light_packet) => {
-                        let mut light_buf = Vec::new();
-                        if let Err(err) =
-                            light_buf.write_var_int(&VarInt(CLightUpdate::to_id(version)))
-                        {
-                            error!("Failed to write light update id: {err:?}");
-                        } else if let Err(err) =
-                            light_packet.write_packet_data(&mut light_buf, &version)
-                        {
-                            error!("Failed to write light update data: {err:?}");
-                        } else {
-                            self.send_packet_now_data(light_buf.into()).await;
-                        }
-                    }
-                    Err(err) => {
-                        error!("Failed to create light update packet: {err:?}");
-                    }
-                }
+            if !event.cancelled {
+                valid_chunks.push(chunk.clone());
             }
         }
-        if self.version.load() >= JavaMinecraftVersion::V_1_20_2 {
-            self.send_packet(&CChunkBatchEnd::new(chunks.len() as u16))
-                .await;
+        if valid_chunks.is_empty() {
+            return;
+        }
+
+        let version = self.version.load();
+        let mut last_completion = if version >= JavaMinecraftVersion::V_1_20_2 {
+            match Self::serialize_packet_for_version(&CChunkBatchStart, version) {
+                Ok(packet) => self.enqueue_priority_packet_data(packet).await,
+                Err(err) => {
+                    error!("Failed to serialize Java chunk batch start: {err:?}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let encode_jobs = valid_chunks
+            .into_iter()
+            .map(|chunk| tokio::task::spawn_blocking(move || encode_java_chunk(&chunk, version)));
+        let mut encoded_chunks = stream::iter(encode_jobs).buffered(4);
+        let mut sent_chunks = 0u16;
+        while let Some(result) = encoded_chunks.next().await {
+            let encoded = match result {
+                Ok(Ok(encoded)) => encoded,
+                Ok(Err(err)) => {
+                    error!("Failed to serialize Java chunk: {err:?}");
+                    continue;
+                }
+                Err(err) => {
+                    error!("Join error in Java chunk serialization: {err:?}");
+                    continue;
+                }
+            };
+
+            let Some(completion) = self.enqueue_priority_packet_data(encoded.chunk).await else {
+                return;
+            };
+            last_completion = Some(completion);
+            if let Some(light) = encoded.light {
+                let Some(completion) = self.enqueue_priority_packet_data(light).await else {
+                    return;
+                };
+                last_completion = Some(completion);
+            }
+            sent_chunks = sent_chunks.saturating_add(1);
+        }
+
+        if version >= JavaMinecraftVersion::V_1_20_2
+            && let Ok(packet) =
+                Self::serialize_packet_for_version(&CChunkBatchEnd::new(sent_chunks), version)
+        {
+            last_completion = self.enqueue_priority_packet_data(packet).await;
+        }
+        if let Some(completion) = last_completion {
+            self.await_priority_completion(completion).await;
         }
     }
 
@@ -399,9 +453,12 @@ impl JavaClient {
     }
 
     pub async fn enqueue_packet_data(&self, packet_data: Bytes) {
+        let Some(budget) = self.reserve_outgoing_bytes(packet_data.len()).await else {
+            return;
+        };
         if let Err(err) = self
             .outgoing_packet_queue_send
-            .send(OutgoingPacket::normal(packet_data))
+            .send(OutgoingPacket::normal(packet_data, budget))
             .await
         {
             // This is expected to fail if we are closed
@@ -422,27 +479,57 @@ impl JavaClient {
     }
 
     pub fn try_enqueue_packet_data(&self, packet_data: Bytes) {
-        if let Err(err) = self
+        let _ = self.try_enqueue_packet_data_inner(packet_data);
+    }
+
+    fn try_enqueue_packet_data_inner(&self, packet_data: Bytes) -> bool {
+        let Some(budget) = self.try_reserve_outgoing_bytes(packet_data.len()) else {
+            return false;
+        };
+        match self
             .outgoing_packet_queue_send
-            .try_send(OutgoingPacket::normal(packet_data))
+            .try_send(OutgoingPacket::normal(packet_data, budget))
         {
-            match err {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                    debug!(
-                        "Failed to add packet to the outgoing packet queue for client {}: channel full",
-                        self.id
-                    );
-                }
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                    if !self.close_token.is_cancelled() {
-                        warn!(
-                            "Failed to add packet to the outgoing packet queue for client {}: channel closed",
+            Ok(()) => true,
+            Err(err) => {
+                match err {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                        record_outbound_drop();
+                        debug!(
+                            "Failed to add packet to the outgoing packet queue for client {}: channel full",
                             self.id
                         );
-                        self.close();
+                    }
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                        if !self.close_token.is_cancelled() {
+                            warn!(
+                                "Failed to add packet to the outgoing packet queue for client {}: channel closed",
+                                self.id
+                            );
+                            self.close();
+                        }
                     }
                 }
+                false
             }
+        }
+    }
+
+    pub(crate) fn try_enqueue_state_packet(&self, kind: StatePacketKind, packet_data: Bytes) {
+        let sequence = self.state_recovery_sequence.fetch_add(1, Ordering::Relaxed);
+        let key = StateRecoveryKey::for_packet(kind, sequence);
+        if self
+            .state_recovery
+            .route(key, sequence, packet_data, |packet_data| {
+                self.try_enqueue_packet_data_inner(packet_data) || self.close_token.is_cancelled()
+            })
+            .is_err()
+        {
+            warn!(
+                "Closing client {} because the bounded state recovery queue is full",
+                self.id
+            );
+            self.close();
         }
     }
 
@@ -506,11 +593,19 @@ impl JavaClient {
     }
 
     pub async fn send_packet_now_data(&self, packet: Bytes) {
+        let Some(completion) = self.enqueue_priority_packet_data(packet).await else {
+            return;
+        };
+        self.await_priority_completion(completion).await;
+    }
+
+    async fn enqueue_priority_packet_data(&self, packet: Bytes) -> Option<oneshot::Receiver<()>> {
+        let budget = self.reserve_outgoing_bytes(packet.len()).await?;
         let (completion_tx, completion_rx) = oneshot::channel();
 
         if let Err(err) = self
             .outgoing_packet_priority_send
-            .send(OutgoingPacket::high_priority(packet, completion_tx))
+            .send(OutgoingPacket::high_priority(packet, completion_tx, budget))
             .await
         {
             // It is expected that the packet will fail if we are closed
@@ -523,12 +618,57 @@ impl JavaClient {
                 // unknown state
                 self.close();
             }
-            return;
+            return None;
         }
 
+        Some(completion_rx)
+    }
+
+    async fn await_priority_completion(&self, completion_rx: oneshot::Receiver<()>) {
         if completion_rx.await.is_err() && !self.close_token.is_cancelled() {
             // The outgoing packet task dropped before confirming the write.
             self.close();
+        }
+    }
+
+    async fn reserve_outgoing_bytes(&self, bytes: usize) -> Option<OutboundBytePermit> {
+        let result = tokio::select! {
+            () = self.close_token.cancelled() => return None,
+            result = self.outgoing_byte_budget.reserve(bytes) => result,
+        };
+        match result {
+            Ok(permit) => Some(permit),
+            Err(ByteBudgetError::Oversized { bytes, limit }) => {
+                warn!(
+                    "Refusing oversized outgoing packet for client {}: {bytes} bytes exceeds {limit}",
+                    self.id
+                );
+                self.close();
+                None
+            }
+            Err(ByteBudgetError::Closed | ByteBudgetError::Full) => None,
+        }
+    }
+
+    fn try_reserve_outgoing_bytes(&self, bytes: usize) -> Option<OutboundBytePermit> {
+        match self.outgoing_byte_budget.try_reserve(bytes) {
+            Ok(permit) => Some(permit),
+            Err(ByteBudgetError::Full) => {
+                debug!(
+                    "Dropping outgoing packet for client {}: queued byte budget is full",
+                    self.id
+                );
+                None
+            }
+            Err(ByteBudgetError::Oversized { bytes, limit }) => {
+                warn!(
+                    "Refusing oversized outgoing packet for client {}: {bytes} bytes exceeds {limit}",
+                    self.id
+                );
+                self.close();
+                None
+            }
+            Err(ByteBudgetError::Closed) => None,
         }
     }
 
@@ -580,6 +720,10 @@ impl JavaClient {
     /// - **Status:** Handles status request and ping packets.
     /// - **Login/Transfer:** Handles login and transfer packets.
     /// - **Config:** Handles configuration packets.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "queue selection, bounded batching, write, flush, and completion acknowledgements form one ordered sender lifecycle"
+    )]
     pub fn start_outgoing_packet_task(&mut self) {
         const MAX_BATCH_SIZE: usize = 64;
 
@@ -599,35 +743,63 @@ impl JavaClient {
             return;
         };
         let id = self.id;
+        self.start_state_recovery_task();
         self.spawn_task(async move {
+            let mut priority_burst = PriorityBurst::default();
             while !close_token.is_cancelled() {
-                let recv_result = tokio::select! {
-                    biased;
-                    () = close_token.cancelled() => None,
-                    res = priority_packet_receiver.recv() => res,
-                    res = packet_receiver.recv() => res,
+                let recv_result = if priority_burst.prefer_normal() {
+                    tokio::select! {
+                        biased;
+                        () = close_token.cancelled() => None,
+                        res = packet_receiver.recv() => res.map(|packet| (packet, false)),
+                        res = priority_packet_receiver.recv() => res.map(|packet| (packet, true)),
+                    }
+                } else {
+                    tokio::select! {
+                        biased;
+                        () = close_token.cancelled() => None,
+                        res = priority_packet_receiver.recv() => res.map(|packet| (packet, true)),
+                        res = packet_receiver.recv() => res.map(|packet| (packet, false)),
+                    }
                 };
 
-                let Some(packet_data) = recv_result else {
+                let Some((packet_data, was_priority)) = recv_result else {
                     break;
                 };
+                if was_priority {
+                    priority_burst.record_priority();
+                } else {
+                    priority_burst.record_normal();
+                }
 
                 let mut packet_batch = Vec::with_capacity(MAX_BATCH_SIZE);
                 packet_batch.push(packet_data);
 
                 while packet_batch.len() < MAX_BATCH_SIZE {
-                    match priority_packet_receiver.try_recv() {
-                        Ok(packet_data) => {
-                            packet_batch.push(packet_data);
-                            continue;
-                        }
-                        Err(TryRecvError::Disconnected | TryRecvError::Empty) => {}
+                    let next = if priority_burst.prefer_normal() {
+                        packet_receiver
+                            .try_recv()
+                            .map(|packet| (packet, false))
+                            .or_else(|_| {
+                                priority_packet_receiver
+                                    .try_recv()
+                                    .map(|packet| (packet, true))
+                            })
+                    } else {
+                        priority_packet_receiver
+                            .try_recv()
+                            .map(|packet| (packet, true))
+                            .or_else(|_| packet_receiver.try_recv().map(|packet| (packet, false)))
+                    };
+                    let Ok((packet_data, was_priority)) = next else {
+                        break;
+                    };
+                    if was_priority {
+                        priority_burst.record_priority();
+                    } else {
+                        priority_burst.record_normal();
                     }
-
-                    match packet_receiver.try_recv() {
-                        Ok(packet_data) => packet_batch.push(packet_data),
-                        Err(TryRecvError::Disconnected | TryRecvError::Empty) => break,
-                    }
+                    packet_batch.push(packet_data);
                 }
 
                 let send_failed = {
@@ -663,6 +835,39 @@ impl JavaClient {
                         let _ = completion.send(());
                     }
                 }
+            }
+        });
+    }
+
+    fn start_state_recovery_task(&self) {
+        let recovery_queue = Arc::clone(&self.state_recovery);
+        let recovery_sender = self.outgoing_packet_queue_send.clone();
+        let recovery_budget = self.outgoing_byte_budget.clone();
+        let recovery_close = self.close_token.clone();
+        self.spawn_task(async move {
+            'recovery: loop {
+                let batch = tokio::select! {
+                    () = recovery_close.cancelled() => break,
+                    batch = recovery_queue.next_batch() => batch,
+                };
+                for packet_data in batch {
+                    let reserve = tokio::select! {
+                        () = recovery_close.cancelled() => break 'recovery,
+                        reserve = recovery_budget.reserve(packet_data.len()) => reserve,
+                    };
+                    let Ok(permit) = reserve else {
+                        break 'recovery;
+                    };
+                    if recovery_sender
+                        .send(OutgoingPacket::normal(packet_data, permit))
+                        .await
+                        .is_err()
+                    {
+                        break 'recovery;
+                    }
+                    record_outbound_resnapshot();
+                }
+                recovery_queue.finish_batch();
             }
         });
     }

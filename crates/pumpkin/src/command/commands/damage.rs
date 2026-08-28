@@ -14,7 +14,7 @@ use crate::command::{
         builder::{argument, literal},
     },
 };
-use crate::entity::EntityBase;
+use crate::entity::DamageContext;
 
 const NAMES: [&str; 1] = ["damage"];
 const DESCRIPTION: &str = "Deals damage to entities";
@@ -79,7 +79,10 @@ impl CommandExecutor for LocationExecutor {
             let location = Position3DArgumentConsumer::find_arg(args, ARG_LOCATION)?;
 
             let success = target
-                .damage_with_context(&*target, amount, damage_type, Some(location), None, None)
+                .damage_with_context(
+                    &*target,
+                    DamageContext::new(amount, damage_type).with_position(location),
+                )
                 .await;
 
             send_damage_result(sender, success, amount, target.get_display_name().await).await
@@ -113,16 +116,14 @@ impl CommandExecutor for EntityExecutor {
                 None
             };
 
-            let success = target
-                .damage_with_context(
-                    &*target,
-                    amount,
-                    damage_type,
-                    None,
-                    source.as_ref().map(|e| e.as_ref() as &dyn EntityBase),
-                    cause.as_ref().map(|e| e.as_ref() as &dyn EntityBase),
-                )
-                .await;
+            let mut context = DamageContext::new(amount, damage_type);
+            if let Some(source) = source.as_deref() {
+                context = context.with_direct_entity(source);
+            }
+            if let Some(cause) = cause.as_deref() {
+                context = context.with_causing_entity(cause);
+            }
+            let success = target.damage_with_context(&*target, context).await;
 
             send_damage_result(sender, success, amount, target.get_display_name().await).await
         })

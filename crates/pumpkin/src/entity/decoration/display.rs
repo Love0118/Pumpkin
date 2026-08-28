@@ -4,7 +4,7 @@ use std::sync::{
 };
 use tokio::sync::Mutex;
 
-use pumpkin_data::{damage::DamageType, item_stack::ItemStack};
+use pumpkin_data::item_stack::ItemStack;
 use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
 use pumpkin_protocol::{
     codec::{item_stack_seralizer::ItemStackSerializer, var_int::VarInt},
@@ -14,7 +14,9 @@ use pumpkin_protocol::{
 use pumpkin_util::{math::vector3::Vector3, text::TextComponent};
 
 use crate::{
-    entity::{Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity},
+    entity::{
+        DamageContext, Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity,
+    },
     server::Server,
 };
 
@@ -627,7 +629,7 @@ impl BlockDisplayEntity {
 }
 
 impl EntityBase for BlockDisplayEntity {
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
+    fn write_custom_nbt_async<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
             self.display.write_display_nbt(nbt).await;
             nbt.put_int("block_state", self.block_state.load(Ordering::Relaxed));
@@ -694,12 +696,8 @@ impl EntityBase for BlockDisplayEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        _amount: f32,
-        _damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        _source: Option<&'a dyn EntityBase>,
-        _cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        _context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move { false })
     }
@@ -752,7 +750,7 @@ impl ItemDisplayEntity {
 }
 
 impl EntityBase for ItemDisplayEntity {
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
+    fn write_custom_nbt_async<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
             self.display.write_display_nbt(nbt).await;
             let display_mode_str = match self.item_display.load(Ordering::Relaxed) {
@@ -848,12 +846,8 @@ impl EntityBase for ItemDisplayEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        _amount: f32,
-        _damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        _source: Option<&'a dyn EntityBase>,
-        _cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        _context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move { false })
     }
@@ -1033,7 +1027,7 @@ impl TextDisplayEntity {
 }
 
 impl EntityBase for TextDisplayEntity {
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
+    fn write_custom_nbt_async<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
             self.display.write_display_nbt(nbt).await;
             let text_json_res = pumpkin_util::serde_json::to_string(&*self.text.lock().await);
@@ -1178,12 +1172,8 @@ impl EntityBase for TextDisplayEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        _amount: f32,
-        _damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        _source: Option<&'a dyn EntityBase>,
-        _cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        _context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move { false })
     }

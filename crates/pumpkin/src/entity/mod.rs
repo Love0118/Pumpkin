@@ -21,7 +21,6 @@ use pumpkin_data::dimension::Dimension;
 use pumpkin_data::entity::EntityStatus;
 use pumpkin_data::fluid::Fluid;
 use pumpkin_data::item_stack::ItemStack;
-use pumpkin_data::packet::CURRENT_MC_VERSION;
 use pumpkin_data::tag::{self, Taggable};
 use pumpkin_data::tracked_data;
 use pumpkin_data::{Block, BlockDirection};
@@ -73,13 +72,14 @@ use pumpkin_util::version::JavaMinecraftVersion;
 use std::collections::{BTreeMap, HashSet};
 use std::pin::Pin;
 use std::sync::{
-    Arc,
+    Arc, LazyLock,
     atomic::{
         AtomicBool, AtomicI32, AtomicU8, AtomicU32,
         Ordering::{self, Relaxed},
     },
 };
 use tokio::sync::Mutex;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 pub mod ageable;
@@ -136,18 +136,279 @@ pub type EntityBaseFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub type TeleportFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
+/// Immutable input captured at a damage entry point and forwarded unchanged
+/// through entity-specific damage layers.
+#[derive(Clone, Copy)]
+pub struct DamageContext<'a> {
+    amount: f32,
+    damage_type: DamageType,
+    position: Option<Vector3<f64>>,
+    direct_entity: Option<&'a dyn EntityBase>,
+    causing_entity: Option<&'a dyn EntityBase>,
+}
+
+impl<'a> DamageContext<'a> {
+    #[must_use]
+    pub const fn new(amount: f32, damage_type: DamageType) -> Self {
+        Self {
+            amount,
+            damage_type,
+            position: None,
+            direct_entity: None,
+            causing_entity: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_amount(self, amount: f32) -> Self {
+        Self { amount, ..self }
+    }
+
+    #[must_use]
+    pub const fn with_position(self, position: Vector3<f64>) -> Self {
+        Self {
+            position: Some(position),
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub const fn with_direct_entity(self, direct_entity: &'a dyn EntityBase) -> Self {
+        Self {
+            direct_entity: Some(direct_entity),
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub const fn with_causing_entity(self, causing_entity: &'a dyn EntityBase) -> Self {
+        Self {
+            causing_entity: Some(causing_entity),
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub const fn amount(self) -> f32 {
+        self.amount
+    }
+
+    #[must_use]
+    pub const fn damage_type(self) -> DamageType {
+        self.damage_type
+    }
+
+    #[must_use]
+    pub const fn position(self) -> Option<Vector3<f64>> {
+        self.position
+    }
+
+    #[must_use]
+    pub const fn direct_entity(self) -> Option<&'a dyn EntityBase> {
+        self.direct_entity
+    }
+
+    #[must_use]
+    pub const fn causing_entity(self) -> Option<&'a dyn EntityBase> {
+        self.causing_entity
+    }
+}
+
+#[cfg(test)]
+mod damage_context_tests {
+    use super::DamageContext;
+    use pumpkin_data::damage::DamageType;
+    use pumpkin_util::math::vector3::Vector3;
+
+    #[test]
+    fn builders_preserve_the_original_context() {
+        let original = DamageContext::new(4.0, DamageType::MOB_ATTACK)
+            .with_position(Vector3::new(1.0, 2.0, 3.0));
+        let adjusted = original.with_amount(2.5);
+
+        assert_eq!(original.amount(), 4.0);
+        assert_eq!(adjusted.amount(), 2.5);
+        assert!(original.damage_type() == DamageType::MOB_ATTACK);
+        assert_eq!(original.position(), Some(Vector3::new(1.0, 2.0, 3.0)));
+        assert!(original.direct_entity().is_none());
+        assert!(original.causing_entity().is_none());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionResult {
+    Pass,
+    Success,
+    SuccessServer,
+    Consume,
+    Fail,
+}
+
+impl InteractionResult {
+    #[must_use]
+    pub const fn should_run_item_fallback(self) -> bool {
+        matches!(self, Self::Pass)
+    }
+
+    #[must_use]
+    pub const fn consumes_action(self) -> bool {
+        matches!(self, Self::Success | Self::SuccessServer | Self::Consume)
+    }
+}
+
+#[cfg(test)]
+mod interaction_result_tests {
+    use super::InteractionResult;
+
+    #[test]
+    fn only_pass_runs_item_fallback() {
+        assert!(InteractionResult::Pass.should_run_item_fallback());
+        for result in [
+            InteractionResult::Success,
+            InteractionResult::SuccessServer,
+            InteractionResult::Consume,
+            InteractionResult::Fail,
+        ] {
+            assert!(!result.should_run_item_fallback());
+        }
+    }
+
+    #[test]
+    fn successful_results_consume_the_action() {
+        assert!(!InteractionResult::Pass.consumes_action());
+        assert!(!InteractionResult::Fail.consumes_action());
+        assert!(InteractionResult::Success.consumes_action());
+        assert!(InteractionResult::SuccessServer.consumes_action());
+        assert!(InteractionResult::Consume.consumes_action());
+    }
+}
+
+#[cfg(test)]
+mod residual_nbt_tests {
+    use pumpkin_data::entity::EntityType;
+    use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
+    use pumpkin_util::math::vector3::Vector3;
+    use std::{collections::HashSet, sync::Arc};
+    use uuid::Uuid;
+
+    use super::{
+        ENTITY_SAVE_IDS, EntityPersistentData, EntitySaveSnapshot, bounded_entity_residual_nbt,
+    };
+
+    #[test]
+    fn unknown_tags_survive_while_authoritative_tags_win() {
+        let mut source = NbtCompound::new();
+        source.put_int("Health", 1);
+        source.put_string("PluginField", "kept".to_owned());
+        source.put_compound("BukkitValues", NbtCompound::new());
+        let mut authoritative = NbtCompound::new();
+        authoritative.put_int("Health", 20);
+
+        let residual = bounded_entity_residual_nbt(&source, &authoritative).unwrap();
+        assert!(!residual.has("Health"));
+        assert!(!residual.has("BukkitValues"));
+        assert_eq!(residual.get_string("PluginField"), Some("kept"));
+
+        let mut output = residual;
+        output.child_tags.extend(authoritative.child_tags.clone());
+        assert_eq!(output.get_int("Health"), Some(20));
+        assert_eq!(output.get_string("PluginField"), Some("kept"));
+    }
+
+    #[test]
+    fn residual_entry_and_byte_budgets_fail_closed() {
+        let mut too_many = NbtCompound::new();
+        for index in 0..257 {
+            too_many.put_int(&format!("field_{index}"), index);
+        }
+        assert!(bounded_entity_residual_nbt(&too_many, &NbtCompound::new()).is_err());
+
+        let mut too_large = NbtCompound::new();
+        too_large.put("first", NbtTag::ByteArray(vec![0; 300_000].into()));
+        too_large.put("second", NbtTag::ByteArray(vec![0; 300_000].into()));
+        assert!(bounded_entity_residual_nbt(&too_large, &NbtCompound::new()).is_err());
+    }
+
+    #[test]
+    fn immutable_snapshot_writes_residual_first_and_authoritative_state_last() {
+        let mut residual = NbtCompound::new();
+        residual.put_string("id", "minecraft:stale".to_owned());
+        residual.put_string("PluginField", "kept".to_owned());
+        let mut custom_data = NbtCompound::new();
+        custom_data.put_int("value", 7);
+        let snapshot = EntitySaveSnapshot {
+            entity_id: "minecraft:pig".into(),
+            entity_uuid: Uuid::nil(),
+            position: Vector3::new(1.0, 2.0, 3.0),
+            velocity: Vector3::new(0.1, 0.2, 0.3),
+            yaw: 90.0,
+            pitch: 15.0,
+            fire_ticks: 2,
+            on_ground: true,
+            invulnerable: false,
+            portal_cooldown: 4,
+            has_visual_fire: true,
+            frozen_ticks: 5,
+            custom_name: None,
+            custom_name_visible: false,
+            persistent: EntityPersistentData {
+                scoreboard_tags: HashSet::from(["snapshot".to_owned()]),
+                custom_data,
+                residual_nbt: residual,
+            },
+        };
+
+        let mut output = NbtCompound::new();
+        snapshot.write_complete(&mut output);
+
+        assert_eq!(output.get_string("id"), Some("minecraft:pig"));
+        assert_eq!(output.get_string("PluginField"), Some("kept"));
+        assert_eq!(
+            output
+                .get_compound("PumpkinCustomData")
+                .and_then(|data| data.get_int("value")),
+            Some(7)
+        );
+        assert_eq!(
+            output
+                .get_list("Tags")
+                .and_then(|tags| tags.first())
+                .and_then(NbtTag::extract_string),
+            Some("snapshot")
+        );
+    }
+
+    #[test]
+    fn entity_save_ids_are_namespaced_once_per_registry_entry() {
+        for entity_type in EntityType::ALL {
+            let cached = &ENTITY_SAVE_IDS[usize::from(entity_type.id)];
+            assert_eq!(
+                cached.as_ref(),
+                format!("minecraft:{}", entity_type.resource_name)
+            );
+            assert!(Arc::ptr_eq(cached, &cached.clone()));
+        }
+    }
+}
+
 pub trait EntityBase: Send + Sync + std::any::Any {
     fn write_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
-            self.get_entity().write_nbt(nbt).await;
+            self.get_entity()
+                .capture_save_snapshot()
+                .await
+                .write_complete(nbt);
             if let Some(living) = self.get_living_entity() {
                 living.write_living_nbt(nbt).await;
             }
-            self.write_custom_nbt(nbt).await;
+            self.write_custom_nbt(nbt);
+            self.write_custom_nbt_async(nbt).await;
         })
     }
 
-    fn write_custom_nbt<'a>(&'a self, _nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
+    fn write_custom_nbt(&self, _nbt: &mut NbtCompound) {}
+
+    fn write_custom_nbt_async<'a>(&'a self, _nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async {})
     }
 
@@ -158,6 +419,17 @@ pub trait EntityBase: Send + Sync + std::any::Any {
                 living.read_living_nbt_non_mut(nbt).await;
             }
             self.read_custom_nbt(nbt).await;
+
+            let mut authoritative = NbtCompound::new();
+            self.get_entity().write_nbt(&mut authoritative).await;
+            if let Some(living) = self.get_living_entity() {
+                living.write_living_nbt(&mut authoritative).await;
+            }
+            self.write_custom_nbt(&mut authoritative);
+            self.write_custom_nbt_async(&mut authoritative).await;
+            self.get_entity()
+                .capture_residual_nbt(nbt, &authoritative)
+                .await;
         })
     }
 
@@ -272,13 +544,12 @@ pub trait EntityBase: Send + Sync + std::any::Any {
     /// Returns if damage was successful or not
     fn damage<'a>(
         &'a self,
-        caller: &'a dyn EntityBase,
+        target: &'a dyn EntityBase,
         amount: f32,
         damage_type: DamageType,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
-            caller
-                .damage_with_context(caller, amount, damage_type, None, None, None)
+            self.damage_with_context(target, DamageContext::new(amount, damage_type))
                 .await
         })
     }
@@ -292,15 +563,12 @@ pub trait EntityBase: Send + Sync + std::any::Any {
             if self.get_living_entity().is_some() {
                 self.set_on_fire_for(8.0);
                 let cause = lightning.get_cause().await;
-                self.damage_with_context(
-                    caller,
-                    5.0,
-                    DamageType::LIGHTNING_BOLT,
-                    None,
-                    Some(lightning),
-                    cause.as_deref().map(|p| p as &dyn EntityBase),
-                )
-                .await;
+                let mut context = DamageContext::new(5.0, DamageType::LIGHTNING_BOLT)
+                    .with_direct_entity(lightning);
+                if let Some(cause) = cause.as_deref() {
+                    context = context.with_causing_entity(cause);
+                }
+                self.damage_with_context(caller, context).await;
             }
         })
     }
@@ -410,18 +678,12 @@ pub trait EntityBase: Send + Sync + std::any::Any {
 
     fn damage_with_context<'a>(
         &'a self,
-        caller: &'a dyn EntityBase,
-        amount: f32,
-        damage_type: DamageType,
-        position: Option<Vector3<f64>>,
-        source: Option<&'a dyn EntityBase>,
-        cause: Option<&'a dyn EntityBase>,
+        target: &'a dyn EntityBase,
+        context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
-            if caller.get_living_entity().is_some() {
-                return caller
-                    .damage_with_context(caller, amount, damage_type, position, source, cause)
-                    .await;
+            if let Some(living) = self.get_living_entity() {
+                return living.damage_with_context(target, context).await;
             }
             false
         })
@@ -435,6 +697,20 @@ pub trait EntityBase: Send + Sync + std::any::Any {
         _item_stack: &'a mut ItemStack,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async { false })
+    }
+
+    fn interact_result<'a>(
+        &'a self,
+        player: &'a Arc<Player>,
+        item_stack: &'a mut ItemStack,
+    ) -> EntityBaseFuture<'a, InteractionResult> {
+        Box::pin(async move {
+            if self.interact(player, item_stack).await {
+                InteractionResult::Success
+            } else {
+                InteractionResult::Pass
+            }
+        })
     }
 
     fn set_on_fire_for(&self, seconds: f32) {
@@ -451,7 +727,8 @@ pub trait EntityBase: Send + Sync + std::any::Any {
             entity.entity_id,
             ticks as f32 / 20.0,
         );
-        if let Some(server) = entity.world.load().server.upgrade() {
+        let server = entity.world.load().server.upgrade();
+        if let Some(server) = server {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     server.plugin_manager.fire(&server, &mut event).await;
@@ -783,7 +1060,9 @@ pub trait EntityBase: Send + Sync + std::any::Any {
                     .await;
             } else {
                 // TODO this should be removed once all entities are implemented
-                self.get_entity().remove().await;
+                self.get_entity()
+                    .remove_with_reason(RemovalReason::Killed)
+                    .await;
             }
         })
     }
@@ -826,8 +1105,152 @@ impl RemovalReason {
     }
 }
 
+#[cfg(test)]
+mod removal_reason_tests {
+    use super::RemovalReason;
+
+    #[test]
+    fn removal_reason_preserves_destroy_and_save_policy() {
+        assert!(RemovalReason::Killed.should_destroy());
+        assert!(RemovalReason::Discarded.should_destroy());
+        assert!(!RemovalReason::UnloadedToChunk.should_destroy());
+        assert!(!RemovalReason::ChangedDimension.should_destroy());
+
+        assert!(RemovalReason::UnloadedToChunk.should_save());
+        for reason in [
+            RemovalReason::Killed,
+            RemovalReason::Discarded,
+            RemovalReason::UnloadedWithPlayer,
+            RemovalReason::ChangedDimension,
+        ] {
+            assert!(!reason.should_save());
+        }
+    }
+}
+
 // IMPORTANT: have that 1 and not 0 because fetch_add returns previous value and 0 would be invalid
 static CURRENT_ID: AtomicI32 = AtomicI32::new(1);
+static ENTITY_SAVE_IDS: LazyLock<Vec<Arc<str>>> = LazyLock::new(|| {
+    let mut names = vec![Arc::<str>::from(""); EntityType::ALL.len()];
+    for entity_type in EntityType::ALL {
+        let index = usize::from(entity_type.id);
+        if index >= names.len() {
+            names.resize(index + 1, Arc::<str>::from(""));
+        }
+        names[index] = Arc::from(format!("minecraft:{}", entity_type.resource_name));
+    }
+    names
+});
+const MAX_RESIDUAL_NBT_ENTRIES: usize = 256;
+const MAX_RESIDUAL_NBT_BYTES: usize = 512 * 1024;
+
+fn bounded_entity_residual_nbt(
+    source: &NbtCompound,
+    authoritative: &NbtCompound,
+) -> Result<NbtCompound, String> {
+    pumpkin_world::persistence::bounded_residual_nbt(
+        source,
+        authoritative
+            .child_tags
+            .keys()
+            .map(AsRef::as_ref)
+            // BukkitValues is a legacy alias consumed into PumpkinCustomData.
+            .chain(std::iter::once("BukkitValues")),
+        MAX_RESIDUAL_NBT_ENTRIES,
+        MAX_RESIDUAL_NBT_BYTES,
+    )
+}
+
+#[derive(Clone, Default)]
+struct EntityPersistentData {
+    scoreboard_tags: HashSet<String>,
+    custom_data: NbtCompound,
+    residual_nbt: NbtCompound,
+}
+
+struct EntitySaveSnapshot {
+    entity_id: Arc<str>,
+    entity_uuid: Uuid,
+    position: Vector3<f64>,
+    velocity: Vector3<f64>,
+    yaw: f32,
+    pitch: f32,
+    fire_ticks: i16,
+    on_ground: bool,
+    invulnerable: bool,
+    portal_cooldown: i32,
+    has_visual_fire: bool,
+    frozen_ticks: i32,
+    custom_name: Option<TextComponent>,
+    custom_name_visible: bool,
+    persistent: EntityPersistentData,
+}
+
+impl EntitySaveSnapshot {
+    fn write_complete(&self, nbt: &mut NbtCompound) {
+        for (key, value) in &self.persistent.residual_nbt.child_tags {
+            nbt.child_tags
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        self.write_authoritative(nbt);
+    }
+
+    fn write_authoritative(&self, nbt: &mut NbtCompound) {
+        nbt.put_string("id", self.entity_id.clone());
+        nbt.put_uuid("UUID", self.entity_uuid);
+        nbt.put(
+            "Pos",
+            NbtTag::List(vec![
+                self.position.x.into(),
+                self.position.y.into(),
+                self.position.z.into(),
+            ]),
+        );
+        nbt.put(
+            "Motion",
+            NbtTag::List(vec![
+                self.velocity.x.into(),
+                self.velocity.y.into(),
+                self.velocity.z.into(),
+            ]),
+        );
+        nbt.put(
+            "Rotation",
+            NbtTag::List(vec![self.yaw.into(), self.pitch.into()]),
+        );
+        nbt.put_short("Fire", self.fire_ticks);
+        nbt.put_bool("OnGround", self.on_ground);
+        nbt.put_bool("Invulnerable", self.invulnerable);
+        nbt.put_int("PortalCooldown", self.portal_cooldown);
+        if self.has_visual_fire {
+            nbt.put_bool("HasVisualFire", true);
+        }
+        nbt.put_int("TicksFrozen", self.frozen_ticks);
+        if let Some(custom_name) = &self.custom_name
+            && let Ok(name_json) = pumpkin_util::serde_json::to_string(custom_name)
+        {
+            nbt.put_string("CustomName", name_json);
+        }
+        nbt.put_bool("CustomNameVisible", self.custom_name_visible);
+
+        if !self.persistent.scoreboard_tags.is_empty() {
+            nbt.put(
+                "Tags",
+                NbtTag::List(
+                    self.persistent
+                        .scoreboard_tags
+                        .iter()
+                        .map(|tag| NbtTag::String(tag.as_str().into()))
+                        .collect(),
+                ),
+            );
+        }
+        if !self.persistent.custom_data.is_empty() {
+            nbt.put_compound("PumpkinCustomData", self.persistent.custom_data.clone());
+        }
+    }
+}
 
 /// Represents a non-living Entity (e.g. Item, Egg, Snowball...)
 pub struct Entity {
@@ -931,9 +1354,8 @@ pub struct Entity {
     pub custom_name_visible: AtomicBool,
     pub silent: AtomicBool,
     pub has_no_gravity: AtomicBool,
-    /// Scoreboard tags attached to this entity, managed with `/tag`.
-    /// Vanilla allows at most [`MAX_SCOREBOARD_TAGS`] tags per entity.
-    pub scoreboard_tags: Mutex<HashSet<String>>,
+    /// Scoreboard tags, plugin data, and residual NBT captured under one save lock.
+    persistent_data: Mutex<EntityPersistentData>,
     /// The data send in the Entity Spawn packet
     pub data: AtomicI32,
     /// Stores entity boolean flags (on fire, sneaking, invisible, glowing, etc.)
@@ -958,8 +1380,6 @@ pub struct Entity {
     pub last_sent_pos: AtomicCell<Vector3<f64>>,
     /// Cache for the last sent head yaw byte
     pub last_sent_head_yaw: AtomicU8,
-    /// Persistent custom data container for plugins (matching Bukkit's `PersistentDataHolder`)
-    pub custom_data: Mutex<NbtCompound>,
 }
 
 impl Entity {
@@ -1073,7 +1493,7 @@ impl Entity {
             custom_name_visible: AtomicBool::new(false),
             silent: AtomicBool::new(false),
             has_no_gravity: AtomicBool::new(false),
-            scoreboard_tags: Mutex::new(HashSet::new()),
+            persistent_data: Mutex::new(EntityPersistentData::default()),
             no_clip: AtomicBool::new(false),
             movement_multiplier: AtomicCell::new(Vector3::default()),
             velocity_dirty: AtomicBool::new(true),
@@ -1082,7 +1502,6 @@ impl Entity {
             last_sent_pitch: AtomicU8::new(0),
             last_sent_head_yaw: AtomicU8::new(0),
             last_sent_pos: AtomicCell::new(position),
-            custom_data: Mutex::new(NbtCompound::new()),
         }
     }
 
@@ -1164,7 +1583,8 @@ impl Entity {
     /// Returns `false` if the entity already has the tag or already carries
     /// [`MAX_SCOREBOARD_TAGS`] tags.
     pub async fn add_scoreboard_tag(&self, tag: &str) -> bool {
-        let mut tags = self.scoreboard_tags.lock().await;
+        let mut persistent = self.persistent_data.lock().await;
+        let tags = &mut persistent.scoreboard_tags;
         tags.len() < MAX_SCOREBOARD_TAGS && tags.insert(tag.to_owned())
     }
 
@@ -1172,7 +1592,23 @@ impl Entity {
     ///
     /// Returns `false` if the entity did not have the tag.
     pub async fn remove_scoreboard_tag(&self, tag: &str) -> bool {
-        self.scoreboard_tags.lock().await.remove(tag)
+        self.persistent_data
+            .lock()
+            .await
+            .scoreboard_tags
+            .remove(tag)
+    }
+
+    pub async fn has_scoreboard_tag(&self, tag: &str) -> bool {
+        self.persistent_data
+            .lock()
+            .await
+            .scoreboard_tags
+            .contains(tag)
+    }
+
+    pub async fn scoreboard_tags_snapshot(&self) -> HashSet<String> {
+        self.persistent_data.lock().await.scoreboard_tags.clone()
     }
 
     /// Sets a custom name for the entity, typically used with nametags
@@ -2491,7 +2927,8 @@ impl Entity {
                 self.entity_id,
                 pos,
             );
-        if let Some(server) = self.world.load().server.upgrade() {
+        let server = self.world.load().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut portal_event).await;
         }
         if portal_event.cancelled {
@@ -2675,7 +3112,14 @@ impl Entity {
 
     /// Removes the `Entity` from their current `World`
     pub async fn remove(&self) {
-        self.world.load().remove_entity(self).await;
+        self.remove_with_reason(RemovalReason::Discarded).await;
+    }
+
+    pub async fn remove_with_reason(&self, reason: RemovalReason) {
+        self.world
+            .load()
+            .remove_entity_with_reason(self, reason)
+            .await;
     }
 
     pub fn create_spawn_packet(&self) -> CSpawnEntity {
@@ -2759,7 +3203,8 @@ impl Entity {
                     self.entity_id,
                     swimming,
                 );
-            if let Some(server) = self.world.load().server.upgrade() {
+            let server = self.world.load().server.upgrade();
+            if let Some(server) = server {
                 server.plugin_manager.fire(&server, &mut event).await;
             }
             if event.cancelled {
@@ -3028,18 +3473,29 @@ impl Entity {
             World::collect_java_recipients_by_version(java_recipients.into_iter());
 
         for (version, recipients) in recipients_by_version {
-            if version < CURRENT_MC_VERSION {
-                continue;
-            }
             let mut buf = Vec::new();
+            let mut serialization_failed = false;
             for m in meta {
-                let _ = m.write(&mut buf, &version);
+                if let Err(serialization_error) = m.write(&mut buf, &version) {
+                    error!(
+                        "Failed to serialize entity {} metadata for {version:?}: {serialization_error}",
+                        self.entity_id
+                    );
+                    serialization_failed = true;
+                    break;
+                }
+            }
+            if serialization_failed {
+                continue;
             }
             buf.put_u8(255);
             let packet = CSetEntityMetadata::new(self.entity_id.into(), buf.into());
             if let Ok(packet_data) = JavaClient::serialize_packet_for_version(&packet, version) {
                 for recipient in recipients {
-                    recipient.try_enqueue_packet(packet_data.clone());
+                    recipient.try_enqueue_state_packet(
+                        crate::net::StatePacketKind::Metadata(self.entity_id),
+                        packet_data.clone(),
+                    );
                 }
             }
         }
@@ -3056,7 +3512,10 @@ impl Entity {
             };
             for recipient in bedrock_recipients {
                 if let Ok(packet_data) = recipient.serialize_packet(&packet) {
-                    recipient.try_enqueue_packet(packet_data);
+                    recipient.try_enqueue_state_packet(
+                        crate::net::StatePacketKind::Metadata(self.entity_id),
+                        packet_data,
+                    );
                 }
             }
         }
@@ -3068,7 +3527,8 @@ impl Entity {
                 self.entity_id,
                 (pose as u8).to_string(),
             );
-        if let Some(server) = self.world.load().server.upgrade() {
+        let server = self.world.load().server.upgrade();
+        if let Some(server) = server {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     server.plugin_manager.fire(&server, &mut pose_event).await;
@@ -3282,8 +3742,9 @@ impl Entity {
             },
         };
 
-        self.world.load().broadcast_to_chunk_editioned_sync(
+        self.world.load().broadcast_state_to_chunk_editioned_sync(
             self.chunk_pos.load(),
+            crate::net::StatePacketKind::Relationship(self.entity_id),
             &je_packet,
             &be_packet,
         );
@@ -3308,8 +3769,9 @@ impl Entity {
             },
         };
 
-        self.world.load().broadcast_to_chunk_editioned_sync(
+        self.world.load().broadcast_state_to_chunk_editioned_sync(
             self.chunk_pos.load(),
+            crate::net::StatePacketKind::Relationship(self.entity_id),
             &je_packet,
             &be_packet,
         );
@@ -3384,7 +3846,8 @@ impl Entity {
                 self.entity_id,
                 passenger.get_entity().entity_id,
             );
-        if let Some(server) = self.world.load().server.upgrade() {
+        let server = self.world.load().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut mount_event).await;
             server
                 .plugin_manager
@@ -3408,8 +3871,9 @@ impl Entity {
 
         let world = self.world.load();
         let chunk_pos = self.chunk_pos.load();
-        world.broadcast_to_chunk(
+        world.broadcast_state_to_chunk(
             chunk_pos,
+            crate::net::StatePacketKind::Relationship(self.entity_id),
             &CSetPassengers::new(VarInt(self.entity_id), &passenger_ids),
         );
     }
@@ -3430,8 +3894,9 @@ impl Entity {
             .collect();
         drop(passengers);
 
-        self.world.load().broadcast_to_chunk(
+        self.world.load().broadcast_state_to_chunk(
             self.chunk_pos.load(),
+            crate::net::StatePacketKind::Relationship(self.entity_id),
             &CSetPassengers::new(VarInt(self.entity_id), &passenger_ids),
         );
     }
@@ -3448,7 +3913,8 @@ impl Entity {
                 self.entity_id,
                 passenger_id,
             );
-        if let Some(server) = self.world.load().server.upgrade() {
+        let server = self.world.load().server.upgrade();
+        if let Some(server) = server {
             server
                 .plugin_manager
                 .fire(&server, &mut dismount_event)
@@ -3512,13 +3978,18 @@ impl Entity {
             let passengers_packet = CSetPassengers::new(VarInt(self.entity_id), &passenger_ids);
             if let Some(player) = passenger.get_player() {
                 player.send_client_packet(&passengers_packet).await;
-                world.broadcast_to_chunk_except(
+                world.broadcast_state_to_chunk_except(
                     chunk_pos,
                     &[player.get_entity().entity_uuid],
+                    crate::net::StatePacketKind::Relationship(self.entity_id),
                     &passengers_packet,
                 );
             } else {
-                world.broadcast_to_chunk(chunk_pos, &passengers_packet);
+                world.broadcast_state_to_chunk(
+                    chunk_pos,
+                    crate::net::StatePacketKind::Relationship(self.entity_id),
+                    &passengers_packet,
+                );
             }
 
             // Calculate dismount directions and offsets (vanilla DismountHelper)
@@ -3733,8 +4204,9 @@ impl Entity {
         } else {
             // No passenger was removed, still need to broadcast the passenger list
             let world = self.world.load();
-            world.broadcast_to_chunk(
+            world.broadcast_state_to_chunk(
                 chunk_pos,
+                crate::net::StatePacketKind::Relationship(self.entity_id),
                 &CSetPassengers::new(VarInt(self.entity_id), &passenger_ids),
             );
         }
@@ -3779,7 +4251,8 @@ impl Entity {
     }
 
     pub async fn set_custom_data(&self, namespace: &str, key: &str, value: NbtTag) {
-        let mut custom_data = self.custom_data.lock().await;
+        let mut persistent = self.persistent_data.lock().await;
+        let custom_data = &mut persistent.custom_data;
 
         let mut namespace_data = custom_data
             .child_tags
@@ -3797,8 +4270,10 @@ impl Entity {
     }
 
     pub async fn get_custom_data(&self, namespace: &str, key: &str) -> Option<NbtTag> {
-        let custom_data = self.custom_data.lock().await;
-        custom_data
+        self.persistent_data
+            .lock()
+            .await
+            .custom_data
             .get(namespace)?
             .extract_compound()?
             .get(key)
@@ -3806,7 +4281,8 @@ impl Entity {
     }
 
     pub async fn remove_custom_data(&self, namespace: &str, key: &str) {
-        let mut custom_data = self.custom_data.lock().await;
+        let mut persistent = self.persistent_data.lock().await;
+        let custom_data = &mut persistent.custom_data;
 
         let Some(NbtTag::Compound(mut namespace_data)) = custom_data.child_tags.remove(namespace)
         else {
@@ -3827,68 +4303,46 @@ impl Entity {
 }
 
 impl Entity {
+    async fn capture_save_snapshot(&self) -> EntitySaveSnapshot {
+        let persistent = self.persistent_data.lock().await.clone();
+        EntitySaveSnapshot {
+            entity_id: ENTITY_SAVE_IDS[usize::from(self.entity_type.id)].clone(),
+            entity_uuid: self.entity_uuid,
+            position: self.pos.load(),
+            velocity: self.velocity.load(),
+            yaw: self.yaw.load(),
+            pitch: self.pitch.load(),
+            fire_ticks: self.fire_ticks.load(Relaxed) as i16,
+            on_ground: self.on_ground.load(Relaxed),
+            invulnerable: self.invulnerable.load(Relaxed),
+            portal_cooldown: self.portal_cooldown.load(Relaxed) as i32,
+            has_visual_fire: self.has_visual_fire.load(Relaxed),
+            frozen_ticks: self.frozen_ticks.load(Relaxed),
+            custom_name: (**self.custom_name.load()).clone(),
+            custom_name_visible: self.custom_name_visible.load(Relaxed),
+            persistent,
+        }
+    }
+
+    async fn capture_residual_nbt(&self, source: &NbtCompound, authoritative: &NbtCompound) {
+        let residual = match bounded_entity_residual_nbt(source, authoritative) {
+            Ok(residual) => residual,
+            Err(error) => {
+                warn!(
+                    entity_id = self.entity_id,
+                    entity_uuid = %self.entity_uuid,
+                    %error,
+                    "Discarding entity residual NBT outside the safety budget"
+                );
+                NbtCompound::new()
+            }
+        };
+        self.persistent_data.lock().await.residual_nbt = residual;
+    }
+
     pub fn write_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
-            let position = self.pos.load();
-            nbt.put_string(
-                "id",
-                format!("minecraft:{}", self.entity_type.resource_name),
-            );
-            nbt.put_uuid("UUID", self.entity_uuid);
-            nbt.put(
-                "Pos",
-                NbtTag::List(vec![
-                    position.x.into(),
-                    position.y.into(),
-                    position.z.into(),
-                ]),
-            );
-            let velocity = self.velocity.load();
-            nbt.put(
-                "Motion",
-                NbtTag::List(vec![
-                    velocity.x.into(),
-                    velocity.y.into(),
-                    velocity.z.into(),
-                ]),
-            );
-            nbt.put(
-                "Rotation",
-                NbtTag::List(vec![self.yaw.load().into(), self.pitch.load().into()]),
-            );
-            nbt.put_short("Fire", self.fire_ticks.load(Relaxed) as i16);
-            nbt.put_bool("OnGround", self.on_ground.load(Relaxed));
-            nbt.put_bool("Invulnerable", self.invulnerable.load(Relaxed));
-            nbt.put_int("PortalCooldown", self.portal_cooldown.load(Relaxed) as i32);
-            if self.has_visual_fire.load(Relaxed) {
-                nbt.put_bool("HasVisualFire", true);
-            }
-            nbt.put_int("TicksFrozen", self.frozen_ticks.load(Relaxed));
-            if let Some(custom_name) = &**self.custom_name.load()
-                && let Ok(name_json) = pumpkin_util::serde_json::to_string(custom_name)
-            {
-                nbt.put_string("CustomName", name_json);
-            }
-            nbt.put_bool("CustomNameVisible", self.custom_name_visible.load(Relaxed));
-
-            let tags = self.scoreboard_tags.lock().await;
-            if !tags.is_empty() {
-                nbt.put(
-                    "Tags",
-                    NbtTag::List(
-                        tags.iter()
-                            .map(|tag| NbtTag::String(tag.as_str().into()))
-                            .collect(),
-                    ),
-                );
-            }
-
-            let custom_data = self.custom_data.lock().await;
-            if !custom_data.is_empty() {
-                nbt.put_compound("PumpkinCustomData", custom_data.clone());
-            }
-
-            // todo more...
+            self.capture_save_snapshot().await.write_authoritative(nbt);
         })
     }
 
@@ -3945,23 +4399,25 @@ impl Entity {
             self.custom_name_visible
                 .store(nbt.get_bool("CustomNameVisible").unwrap_or(false), Relaxed);
 
-            if let Some(tag_list) = nbt.get_list("Tags") {
-                let mut tags = self.scoreboard_tags.lock().await;
-                tags.clear();
-                tags.extend(
-                    tag_list
-                        .iter()
-                        .filter_map(|tag| tag.extract_string().map(str::to_owned))
-                        .take(MAX_SCOREBOARD_TAGS),
-                );
-            }
-
-            if let Some(custom_data) = nbt
+            let tags = nbt.get_list("Tags").map(|tag_list| {
+                tag_list
+                    .iter()
+                    .filter_map(|tag| tag.extract_string().map(str::to_owned))
+                    .take(MAX_SCOREBOARD_TAGS)
+                    .collect::<HashSet<_>>()
+            });
+            let custom_data = nbt
                 .get_compound("PumpkinCustomData")
                 .or_else(|| nbt.get_compound("BukkitValues"))
-            {
-                let mut data = self.custom_data.lock().await;
-                *data = custom_data.clone();
+                .cloned();
+            if tags.is_some() || custom_data.is_some() {
+                let mut persistent = self.persistent_data.lock().await;
+                if let Some(tags) = tags {
+                    persistent.scoreboard_tags = tags;
+                }
+                if let Some(custom_data) = custom_data {
+                    persistent.custom_data = custom_data;
+                }
             }
 
             // todo more...

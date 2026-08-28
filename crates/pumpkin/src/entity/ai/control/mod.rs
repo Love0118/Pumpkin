@@ -1,6 +1,8 @@
 use crate::entity::mob::Mob;
 use pumpkin_util::math::subtract_angles;
 
+pub mod body_rotation_control;
+pub mod jump_control;
 pub mod look_control;
 pub mod move_control;
 

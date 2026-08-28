@@ -2,13 +2,13 @@ use std::sync::{Arc, atomic::Ordering};
 use tokio::sync::Mutex;
 
 use crate::{
-    entity::{Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity},
+    entity::{
+        DamageContext, Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity,
+    },
     net::{bedrock::BedrockClient, java::JavaClient},
     server::Server,
 };
-use pumpkin_data::damage::DamageType;
 use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
-use pumpkin_util::math::vector3::Vector3;
 
 pub struct MarkerEntity {
     pub entity: Entity,
@@ -26,7 +26,7 @@ impl MarkerEntity {
 }
 
 impl EntityBase for MarkerEntity {
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
+    fn write_custom_nbt_async<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
             let data = self.data.lock().await;
             if !data.is_empty() {
@@ -85,12 +85,8 @@ impl EntityBase for MarkerEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        _amount: f32,
-        _damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        _source: Option<&'a dyn EntityBase>,
-        _cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        _context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move { false })
     }

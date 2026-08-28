@@ -6,8 +6,24 @@ use tokio::sync::Mutex;
 
 pub struct SkullBlockEntity {
     pub position: BlockPos,
-    pub note_block_sound: Mutex<Option<String>>,
-    pub profile: Mutex<Option<NbtCompound>>,
+    state: Mutex<SkullState>,
+}
+
+#[derive(Clone, Default)]
+struct SkullState {
+    note_block_sound: Option<String>,
+    profile: Option<NbtCompound>,
+}
+
+impl SkullState {
+    fn write_nbt(self, nbt: &mut NbtCompound) {
+        if let Some(sound) = self.note_block_sound {
+            nbt.put_string("note_block_sound", sound);
+        }
+        if let Some(profile) = self.profile {
+            nbt.put_compound("profile", profile);
+        }
+    }
 }
 
 impl BlockEntity for SkullBlockEntity {
@@ -27,8 +43,10 @@ impl BlockEntity for SkullBlockEntity {
         let profile = nbt.get_compound("profile").cloned();
         Self {
             position,
-            note_block_sound: Mutex::new(note_block_sound),
-            profile: Mutex::new(profile),
+            state: Mutex::new(SkullState {
+                note_block_sound,
+                profile,
+            }),
         }
     }
 
@@ -37,27 +55,13 @@ impl BlockEntity for SkullBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(sound) = self.note_block_sound.lock().await.as_ref() {
-                nbt.put_string("note_block_sound", sound.clone());
-            }
-            if let Some(prof) = self.profile.lock().await.as_ref() {
-                nbt.put_compound("profile", prof.clone());
-            }
+            self.state.lock().await.clone().write_nbt(nbt);
         })
     }
 
     fn chunk_data_nbt(&self) -> Option<NbtCompound> {
         let mut nbt = NbtCompound::new();
-        if let Ok(sound) = self.note_block_sound.try_lock()
-            && let Some(ref sound) = *sound
-        {
-            nbt.put_string("note_block_sound", sound.clone());
-        }
-        if let Ok(profile) = self.profile.try_lock()
-            && let Some(ref prof) = *profile
-        {
-            nbt.put_compound("profile", prof.clone());
-        }
+        self.state.try_lock().ok()?.clone().write_nbt(&mut nbt);
         Some(nbt)
     }
 
@@ -72,8 +76,17 @@ impl SkullBlockEntity {
     pub const fn new(position: BlockPos) -> Self {
         Self {
             position,
-            note_block_sound: Mutex::const_new(None),
-            profile: Mutex::const_new(None),
+            state: Mutex::const_new(SkullState {
+                note_block_sound: None,
+                profile: None,
+            }),
         }
+    }
+
+    pub fn try_note_block_sound(&self) -> Option<String> {
+        self.state
+            .try_lock()
+            .ok()
+            .and_then(|state| state.note_block_sound.clone())
     }
 }

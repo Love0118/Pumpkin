@@ -567,7 +567,7 @@ impl Server {
             ));
         }
 
-        world_to_unload.shutdown().await;
+        world_to_unload.shutdown().await?;
         world_to_unload.unload().await;
 
         self.worlds.rcu(|w_list| {
@@ -635,7 +635,7 @@ impl Server {
         }
 
         for world in self.worlds.load().iter() {
-            world.save().await;
+            world.save().await?;
         }
 
         Ok(())
@@ -771,18 +771,24 @@ impl Server {
         self.tasks.wait().await;
         debug!("Done awaiting tasks for server");
 
-        info!("Starting worlds");
-        for world in self.worlds.load().iter() {
-            world.shutdown().await;
-        }
-        let level_data = self.level_info.load();
-        // then lets save the world info
+        let save_succeeded = match self.save_all().await {
+            Ok(()) => true,
+            Err(error) => {
+                error!("Failed durable server save during shutdown: {error}");
+                false
+            }
+        };
 
-        if let Err(err) = self
-            .world_info_writer
-            .write_world_info(&level_data, &self.basic_config.get_world_path())
-        {
-            error!("Failed to save level.dat: {err}");
+        info!("Shutting down worlds");
+        for world in self.worlds.load().iter() {
+            let result = if save_succeeded {
+                world.shutdown_after_save().await
+            } else {
+                world.shutdown().await
+            };
+            if let Err(error) = result {
+                error!("Failed to durably shut down world: {error}");
+            }
         }
         info!("Completed worlds");
     }

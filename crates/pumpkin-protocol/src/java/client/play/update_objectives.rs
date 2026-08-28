@@ -54,7 +54,9 @@ impl ClientPacket for CUpdateObjectives {
                         p.write_var_int(&VarInt(1))?;
                         let comp = pumpkin_nbt::compound::NbtCompound::new();
                         // Write style properties if any
-                        let bytes = pumpkin_nbt::Nbt::from(comp).write_unnamed();
+                        let bytes = pumpkin_nbt::Nbt::from(comp)
+                            .write_unnamed()
+                            .map_err(|error| WritingError::Message(error.to_string()))?;
                         p.write_all(&bytes).map_err(WritingError::IoError)
                     }
                     NumberFormat::Fixed(text_component) => {

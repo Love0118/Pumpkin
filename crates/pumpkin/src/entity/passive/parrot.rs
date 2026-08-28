@@ -7,7 +7,7 @@ use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::tag::{self, Taggable};
 
 use crate::entity::{
-    Entity, EntityBase, EntityBaseFuture,
+    DamageContext, Entity, EntityBase, EntityBaseFuture,
     ai::goal::{
         look_around::RandomLookAroundGoal, look_at_entity::LookAtEntityGoal, swim::SwimGoal,
         wander_around::WanderAroundGoal,
@@ -79,11 +79,9 @@ impl ParrotEntity {
         // it, so the guard only skips a call that would do nothing anyway.
         self.damage_with_context(
             self,
-            f32::MAX,
-            DamageType::PLAYER_ATTACK,
-            None,
-            Some(player.as_ref()),
-            Some(player.as_ref()),
+            DamageContext::new(f32::MAX, DamageType::PLAYER_ATTACK)
+                .with_direct_entity(player.as_ref())
+                .with_causing_entity(player.as_ref()),
         )
         .await;
     }

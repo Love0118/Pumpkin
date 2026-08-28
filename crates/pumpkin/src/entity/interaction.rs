@@ -5,17 +5,15 @@ use std::sync::{
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use pumpkin_data::{damage::DamageType, item_stack::ItemStack};
+use pumpkin_data::item_stack::ItemStack;
 use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
 use pumpkin_protocol::java::client::play::Metadata;
-use pumpkin_util::math::{
-    boundingbox::{BoundingBox, EntityDimensions},
-    vector3::Vector3,
-};
+use pumpkin_util::math::boundingbox::{BoundingBox, EntityDimensions};
 
 use crate::{
     entity::{
-        Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity, player::Player,
+        DamageContext, Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity,
+        player::Player,
     },
     server::Server,
 };
@@ -138,7 +136,7 @@ impl InteractionEntity {
 }
 
 impl EntityBase for InteractionEntity {
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
+    fn write_custom_nbt_async<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
             nbt.put_float("width", *self.width.lock().await);
             nbt.put_float("height", *self.height.lock().await);
@@ -249,16 +247,13 @@ impl EntityBase for InteractionEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        _amount: f32,
-        _damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        source: Option<&'a dyn EntityBase>,
-        cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
-            let player = source
-                .or(cause)
+            let player = context
+                .direct_entity()
+                .or(context.causing_entity())
                 .and_then(|e| e.cast_any().downcast_ref::<Player>());
             if let Some(player) = player {
                 let timestamp = self.entity.world.load().level_time.lock().await.world_age as i64;

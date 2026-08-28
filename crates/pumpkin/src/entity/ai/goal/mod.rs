@@ -27,6 +27,7 @@ pub mod open_door;
 pub mod owner_hurt_by_target;
 pub mod owner_hurt_target;
 pub mod pathfind_to_raid;
+pub mod persistent_anger_target;
 pub mod pick_up_block;
 pub mod place_block;
 pub mod ranged_attack;
@@ -211,6 +212,10 @@ impl Goal for PrioritizedGoal {
         self.goal.get_tick_count(ticks)
     }
 
+    fn can_stop(&self) -> bool {
+        self.goal.can_stop()
+    }
+
     fn controls(&self) -> Controls {
         self.goal.controls()
     }
@@ -293,3 +298,36 @@ impl<P> Default for ParentHandle<P> {
 unsafe impl<P> Sync for ParentHandle<P> {}
 // SAFETY: ParentHandle stores a raw pointer `*const P` to parent goal structures managed within the same AI engine instance.
 unsafe impl<P> Send for ParentHandle<P> {}
+
+#[cfg(test)]
+mod prioritized_goal_tests {
+    use std::any::TypeId;
+
+    use super::{Goal, PrioritizedGoal};
+
+    struct NonInterruptibleGoal;
+
+    impl Goal for NonInterruptibleGoal {
+        fn can_stop(&self) -> bool {
+            false
+        }
+    }
+
+    struct ChallengerGoal;
+
+    impl Goal for ChallengerGoal {}
+
+    #[test]
+    fn wrapper_delegates_non_interruptible_policy() {
+        let running = PrioritizedGoal::new(
+            TypeId::of::<NonInterruptibleGoal>(),
+            5,
+            Box::new(NonInterruptibleGoal),
+        );
+        let challenger =
+            PrioritizedGoal::new(TypeId::of::<ChallengerGoal>(), 1, Box::new(ChallengerGoal));
+
+        assert!(!running.can_stop());
+        assert!(!running.can_be_replaced_by(&challenger));
+    }
+}

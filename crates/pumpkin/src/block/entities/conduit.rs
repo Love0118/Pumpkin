@@ -7,8 +7,22 @@ use tokio::sync::Mutex;
 
 pub struct ConduitBlockEntity {
     pub position: BlockPos,
-    pub active: Mutex<bool>,
-    pub target: Mutex<Option<NbtTag>>,
+    state: Mutex<ConduitState>,
+}
+
+#[derive(Clone, Default)]
+struct ConduitState {
+    active: bool,
+    target: Option<NbtTag>,
+}
+
+impl ConduitState {
+    fn write_nbt(self, nbt: &mut NbtCompound) {
+        nbt.put_bool("Active", self.active);
+        if let Some(target) = self.target {
+            nbt.put("Target", target);
+        }
+    }
 }
 
 impl BlockEntity for ConduitBlockEntity {
@@ -28,8 +42,7 @@ impl BlockEntity for ConduitBlockEntity {
         let target = nbt.get("Target").cloned();
         Self {
             position,
-            active: Mutex::new(active),
-            target: Mutex::new(target),
+            state: Mutex::new(ConduitState { active, target }),
         }
     }
 
@@ -38,21 +51,13 @@ impl BlockEntity for ConduitBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            nbt.put_bool("Active", *self.active.lock().await);
-            if let Some(tgt) = self.target.lock().await.as_ref() {
-                nbt.put("Target", tgt.clone());
-            }
+            self.state.lock().await.clone().write_nbt(nbt);
         })
     }
 
     fn chunk_data_nbt(&self) -> Option<NbtCompound> {
         let mut nbt = NbtCompound::new();
-        nbt.put_bool("Active", *self.active.try_lock().ok()?);
-        if let Ok(target) = self.target.try_lock()
-            && let Some(ref tgt) = *target
-        {
-            nbt.put("Target", tgt.clone());
-        }
+        self.state.try_lock().ok()?.clone().write_nbt(&mut nbt);
         Some(nbt)
     }
 
@@ -67,8 +72,7 @@ impl ConduitBlockEntity {
     pub fn new(position: BlockPos) -> Self {
         Self {
             position,
-            active: Mutex::new(false),
-            target: Mutex::new(None),
+            state: Mutex::new(ConduitState::default()),
         }
     }
 }

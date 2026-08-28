@@ -77,7 +77,9 @@ impl ClientPacket for CRespawn {
                     *version,
                     self.player_spawn_info.dimension.minecraft_name,
                 );
-                let dim_bytes = pumpkin_nbt::Nbt::new(String::new(), dim_type_compound).write();
+                let dim_bytes = pumpkin_nbt::Nbt::new(String::new(), dim_type_compound)
+                    .write()
+                    .map_err(|error| WritingError::Message(error.to_string()))?;
                 write.write_all(&dim_bytes)?;
             } else {
                 write.write_string(self.player_spawn_info.dimension.minecraft_name)?;

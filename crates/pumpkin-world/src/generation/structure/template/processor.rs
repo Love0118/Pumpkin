@@ -817,7 +817,7 @@ fn json_to_nbt(value: serde_json::Value) -> NbtTag {
             || num.as_f64().map_or(NbtTag::Int(0), NbtTag::Double),
             |i| i32::try_from(i).map_or(NbtTag::Long(i), NbtTag::Int),
         ),
-        serde_json::Value::String(s) => NbtTag::String(s.into_boxed_str()),
+        serde_json::Value::String(s) => NbtTag::String(s.into()),
         serde_json::Value::Array(arr) => {
             let tags: Vec<NbtTag> = arr.into_iter().map(json_to_nbt).collect();
             NbtTag::List(tags)

@@ -5,11 +5,20 @@ use pumpkin_data::entity::EntityType;
 use crate::entity::{
     Entity,
     ai::goal::{
-        look_around::RandomLookAroundGoal, look_at_entity::LookAtEntityGoal, swim::SwimGoal,
-        try_find_water::TryFindWaterGoal, wander_around::WanderAroundGoal,
+        look_around::RandomLookAroundGoal,
+        look_at_entity::LookAtEntityGoal,
+        revenge::{EntityTypeFilter, RevengeGoal},
+        swim::SwimGoal,
+        try_find_water::TryFindWaterGoal,
+        wander_around::WanderAroundGoal,
     },
     mob::{Mob, MobEntity},
 };
+
+const DOLPHIN_IGNORED_DAMAGE_TYPES: &[EntityTypeFilter] = &[
+    EntityTypeFilter::Exact(&EntityType::GUARDIAN),
+    EntityTypeFilter::Exact(&EntityType::ELDER_GUARDIAN),
+];
 
 /// Represents a Dolphin, a neutral aquatic mob that can give players the Dolphin's Grace effect.
 ///
@@ -43,6 +52,22 @@ impl DolphinEntity {
                 LookAtEntityGoal::with_default(mob_weak, &EntityType::PLAYER, 6.0),
             );
             goal_selector.add_goal(3, Box::new(RandomLookAroundGoal::default()));
+        };
+
+        {
+            let mut target_selector = mob_arc
+                .mob_entity
+                .target_selector
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            target_selector.add_goal(
+                1,
+                Box::new(
+                    RevengeGoal::new(true)
+                        .ignore_damage_from(DOLPHIN_IGNORED_DAMAGE_TYPES)
+                        .set_alert_others(),
+                ),
+            );
         };
 
         mob_arc

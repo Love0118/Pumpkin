@@ -38,15 +38,15 @@ impl GoalSelector {
         let mut i = 0;
         while i < self.goals.len() {
             if self.goals[i].type_id == type_id {
-                let goal = self.goals.swap_remove(i);
+                let goal = self.goals.remove(i);
                 for slot in &mut self.goals_by_control {
                     if *slot == usize::MAX {
                         continue;
                     }
                     if *slot == i {
                         *slot = usize::MAX;
-                    } else if *slot == self.goals.len() {
-                        *slot = i;
+                    } else if *slot > i {
+                        *slot -= 1;
                     }
                 }
                 if goal.running {
@@ -166,5 +166,84 @@ impl Default for GoalSelector {
             goals: Vec::default(),
             disabled_controls: Controls::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::TypeId;
+
+    use super::GoalSelector;
+    use crate::entity::ai::goal::{Controls, Goal};
+
+    struct GoalA;
+    struct GoalB;
+    struct GoalC;
+
+    impl Goal for GoalA {}
+    impl Goal for GoalB {}
+    impl Goal for GoalC {}
+
+    struct BlockingMoveGoal;
+
+    impl Goal for BlockingMoveGoal {
+        fn can_stop(&self) -> bool {
+            false
+        }
+
+        fn controls(&self) -> Controls {
+            Controls::MOVE
+        }
+    }
+
+    struct HigherPriorityMoveGoal;
+
+    impl Goal for HigherPriorityMoveGoal {
+        fn controls(&self) -> Controls {
+            Controls::MOVE
+        }
+    }
+
+    #[test]
+    fn removal_and_readd_preserve_stable_registration_order() {
+        let mut selector = GoalSelector::default();
+        selector.add_goal(1, Box::new(GoalA));
+        selector.add_goal(1, Box::new(GoalB));
+        selector.add_goal(1, Box::new(GoalC));
+
+        selector.remove_goal_sync::<GoalB>();
+        assert_eq!(
+            selector
+                .goals
+                .iter()
+                .map(|goal| goal.type_id)
+                .collect::<Vec<_>>(),
+            vec![TypeId::of::<GoalA>(), TypeId::of::<GoalC>()]
+        );
+
+        selector.add_goal(1, Box::new(GoalB));
+        assert_eq!(
+            selector
+                .goals
+                .iter()
+                .map(|goal| goal.type_id)
+                .collect::<Vec<_>>(),
+            vec![
+                TypeId::of::<GoalA>(),
+                TypeId::of::<GoalC>(),
+                TypeId::of::<GoalB>(),
+            ]
+        );
+    }
+
+    #[test]
+    fn control_conflict_respects_non_interruptible_running_goal() {
+        let mut selector = GoalSelector::default();
+        selector.add_goal(5, Box::new(BlockingMoveGoal));
+        selector.add_goal(1, Box::new(HigherPriorityMoveGoal));
+        selector.goals[0].running = true;
+        selector.goals_by_control[Controls::MOVE.idx()] = 0;
+
+        assert!(!selector.can_replace_all(&selector.goals[1]));
     }
 }

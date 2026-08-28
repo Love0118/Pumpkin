@@ -8,8 +8,26 @@ use tokio::sync::Mutex;
 
 pub struct DecoratedPotBlockEntity {
     pub position: BlockPos,
-    pub sherds: Mutex<Option<Vec<NbtTag>>>,
-    pub item: Mutex<Option<ItemStack>>,
+    state: Mutex<DecoratedPotState>,
+}
+
+#[derive(Clone, Default)]
+struct DecoratedPotState {
+    sherds: Option<Vec<NbtTag>>,
+    item: Option<ItemStack>,
+}
+
+impl DecoratedPotState {
+    fn write_nbt(self, nbt: &mut NbtCompound) {
+        if let Some(sherds) = self.sherds {
+            nbt.put_list("sherds", sherds);
+        }
+        if let Some(item) = self.item {
+            let mut item_nbt = NbtCompound::new();
+            item.write_item_stack(&mut item_nbt);
+            nbt.put_compound("item", item_nbt);
+        }
+    }
 }
 
 impl BlockEntity for DecoratedPotBlockEntity {
@@ -31,8 +49,7 @@ impl BlockEntity for DecoratedPotBlockEntity {
             .and_then(ItemStack::read_item_stack);
         Self {
             position,
-            sherds: Mutex::new(sherds),
-            item: Mutex::new(item),
+            state: Mutex::new(DecoratedPotState { sherds, item }),
         }
     }
 
@@ -41,31 +58,13 @@ impl BlockEntity for DecoratedPotBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(sh) = self.sherds.lock().await.as_ref() {
-                nbt.put_list("sherds", sh.clone());
-            }
-            if let Some(it) = self.item.lock().await.as_ref() {
-                let mut it_nbt = NbtCompound::new();
-                it.write_item_stack(&mut it_nbt);
-                nbt.put_compound("item", it_nbt);
-            }
+            self.state.lock().await.clone().write_nbt(nbt);
         })
     }
 
     fn chunk_data_nbt(&self) -> Option<NbtCompound> {
         let mut nbt = NbtCompound::new();
-        if let Ok(sherds) = self.sherds.try_lock()
-            && let Some(ref sh) = *sherds
-        {
-            nbt.put_list("sherds", sh.clone());
-        }
-        if let Ok(item) = self.item.try_lock()
-            && let Some(ref it) = *item
-        {
-            let mut it_nbt = NbtCompound::new();
-            it.write_item_stack(&mut it_nbt);
-            nbt.put_compound("item", it_nbt);
-        }
+        self.state.try_lock().ok()?.clone().write_nbt(&mut nbt);
         Some(nbt)
     }
 
@@ -81,22 +80,24 @@ impl DecoratedPotBlockEntity {
     pub const fn new(position: BlockPos) -> Self {
         Self {
             position,
-            sherds: Mutex::const_new(None),
-            item: Mutex::const_new(None),
+            state: Mutex::const_new(DecoratedPotState {
+                sherds: None,
+                item: None,
+            }),
         }
     }
 
     pub async fn get_item(&self) -> Option<ItemStack> {
-        self.item.lock().await.clone()
+        self.state.lock().await.item.clone()
     }
 
     pub async fn take_item(&self) -> Option<ItemStack> {
-        self.item.lock().await.take()
+        self.state.lock().await.item.take()
     }
 
     pub async fn try_insert_item(&self, stack: &mut ItemStack, count: u8) -> bool {
-        let mut item_guard = self.item.lock().await;
-        if let Some(existing) = item_guard.as_mut() {
+        let mut state = self.state.lock().await;
+        if let Some(existing) = state.item.as_mut() {
             if existing.item.id == stack.item.id {
                 let add = count.min(64 - existing.item_count);
                 if add > 0 {
@@ -110,14 +111,14 @@ impl DecoratedPotBlockEntity {
             let insert_count = count.min(stack.item_count);
             let mut inserted = stack.clone();
             inserted.item_count = insert_count;
-            *item_guard = Some(inserted);
+            state.item = Some(inserted);
             stack.item_count -= insert_count;
             true
         }
     }
 
     pub async fn get_comparator_output(&self) -> u8 {
-        self.item.lock().await.as_ref().map_or(0, |item| {
+        self.state.lock().await.item.as_ref().map_or(0, |item| {
             if item.item_count == 0 {
                 0
             } else {

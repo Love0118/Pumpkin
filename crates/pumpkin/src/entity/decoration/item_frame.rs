@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::entity::player::Player;
-use crate::entity::{Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity};
+use crate::entity::{
+    DamageContext, Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity,
+};
 use crossbeam::atomic::AtomicCell;
 use pumpkin_data::BlockDirection;
 use pumpkin_data::damage::DamageType;
@@ -14,7 +16,6 @@ use pumpkin_data::sound::Sound;
 use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
 use pumpkin_protocol::java::client::play::{CSetEntityMetadata, Metadata};
-use pumpkin_util::math::vector3::Vector3;
 use tokio::sync::Mutex;
 
 /// An item frame or glow item frame.
@@ -263,7 +264,7 @@ impl ItemFrameEntity {
 }
 
 impl EntityBase for ItemFrameEntity {
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
+    fn write_custom_nbt_async<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
             let item = self.item_stack.lock().await;
             if !item.is_empty() {
@@ -408,14 +409,12 @@ impl EntityBase for ItemFrameEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        _amount: f32,
-        damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        source: Option<&'a dyn EntityBase>,
-        _cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
+            let damage_type = context.damage_type();
+            let source = context.direct_entity();
             let fixed = self.is_fixed();
             let is_creative_player = source.is_some_and(|s| {
                 s.cast_any()

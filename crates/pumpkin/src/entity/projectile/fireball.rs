@@ -168,11 +168,9 @@ impl FireballEntity {
 }
 
 impl EntityBase for FireballEntity {
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
-        Box::pin(async move {
-            nbt.put_double("acceleration_power", self.get_acceleration_power());
-            nbt.put_float("ExplosionPower", self.get_explosion_power());
-        })
+    fn write_custom_nbt(&self, nbt: &mut NbtCompound) {
+        nbt.put_double("acceleration_power", self.get_acceleration_power());
+        nbt.put_float("ExplosionPower", self.get_explosion_power());
     }
 
     fn read_custom_nbt<'a>(&'a self, nbt: &'a NbtCompound) -> NbtFuture<'a, ()> {

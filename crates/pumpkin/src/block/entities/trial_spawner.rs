@@ -6,9 +6,28 @@ use tokio::sync::Mutex;
 
 pub struct TrialSpawnerBlockEntity {
     pub position: BlockPos,
-    pub normal_config: Mutex<Option<NbtCompound>>,
-    pub ominous_config: Mutex<Option<NbtCompound>>,
-    pub spawner_data: Mutex<Option<NbtCompound>>,
+    state: Mutex<TrialSpawnerState>,
+}
+
+#[derive(Clone, Default)]
+struct TrialSpawnerState {
+    normal_config: Option<NbtCompound>,
+    ominous_config: Option<NbtCompound>,
+    spawner_data: Option<NbtCompound>,
+}
+
+impl TrialSpawnerState {
+    fn write_nbt(self, nbt: &mut NbtCompound) {
+        if let Some(config) = self.normal_config {
+            nbt.put_compound("normal_config", config);
+        }
+        if let Some(config) = self.ominous_config {
+            nbt.put_compound("ominous_config", config);
+        }
+        if let Some(data) = self.spawner_data {
+            nbt.put_compound("spawner_data", data);
+        }
+    }
 }
 
 impl BlockEntity for TrialSpawnerBlockEntity {
@@ -26,9 +45,11 @@ impl BlockEntity for TrialSpawnerBlockEntity {
     {
         Self {
             position,
-            normal_config: Mutex::new(nbt.get_compound("normal_config").cloned()),
-            ominous_config: Mutex::new(nbt.get_compound("ominous_config").cloned()),
-            spawner_data: Mutex::new(nbt.get_compound("spawner_data").cloned()),
+            state: Mutex::new(TrialSpawnerState {
+                normal_config: nbt.get_compound("normal_config").cloned(),
+                ominous_config: nbt.get_compound("ominous_config").cloned(),
+                spawner_data: nbt.get_compound("spawner_data").cloned(),
+            }),
         }
     }
 
@@ -37,35 +58,13 @@ impl BlockEntity for TrialSpawnerBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(cfg) = self.normal_config.lock().await.as_ref() {
-                nbt.put_compound("normal_config", cfg.clone());
-            }
-            if let Some(cfg) = self.ominous_config.lock().await.as_ref() {
-                nbt.put_compound("ominous_config", cfg.clone());
-            }
-            if let Some(data) = self.spawner_data.lock().await.as_ref() {
-                nbt.put_compound("spawner_data", data.clone());
-            }
+            self.state.lock().await.clone().write_nbt(nbt);
         })
     }
 
     fn chunk_data_nbt(&self) -> Option<NbtCompound> {
         let mut nbt = NbtCompound::new();
-        if let Ok(cfg) = self.normal_config.try_lock()
-            && let Some(ref cfg) = *cfg
-        {
-            nbt.put_compound("normal_config", cfg.clone());
-        }
-        if let Ok(cfg) = self.ominous_config.try_lock()
-            && let Some(ref cfg) = *cfg
-        {
-            nbt.put_compound("ominous_config", cfg.clone());
-        }
-        if let Ok(data) = self.spawner_data.try_lock()
-            && let Some(ref data) = *data
-        {
-            nbt.put_compound("spawner_data", data.clone());
-        }
+        self.state.try_lock().ok()?.clone().write_nbt(&mut nbt);
         Some(nbt)
     }
 
@@ -80,9 +79,11 @@ impl TrialSpawnerBlockEntity {
     pub const fn new(position: BlockPos) -> Self {
         Self {
             position,
-            normal_config: Mutex::const_new(None),
-            ominous_config: Mutex::const_new(None),
-            spawner_data: Mutex::const_new(None),
+            state: Mutex::const_new(TrialSpawnerState {
+                normal_config: None,
+                ominous_config: None,
+                spawner_data: None,
+            }),
         }
     }
 }

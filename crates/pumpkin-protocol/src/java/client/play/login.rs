@@ -258,13 +258,17 @@ impl ClientPacket for CLogin<'_> {
             write.write_list(self.dimension_names, |write, dim| write.write_string(dim))?;
             if !v1_20_2 {
                 let registry_codec = build_v1_20_registry_codec(*version);
-                let nbt_bytes = pumpkin_nbt::Nbt::new(String::new(), registry_codec).write();
+                let nbt_bytes = pumpkin_nbt::Nbt::new(String::new(), registry_codec)
+                    .write()
+                    .map_err(|error| WritingError::Message(error.to_string()))?;
                 write.write_all(&nbt_bytes)?;
                 if v1_16_2 && *version < JavaMinecraftVersion::V_1_19 {
                     // In 1.16.2 - 1.18.2, this field is the dimension type NBT Compound!
                     let dim_type_compound =
                         get_dimension_type_nbt(*version, self.spawn_data.dimension.minecraft_name);
-                    let dim_bytes = pumpkin_nbt::Nbt::new(String::new(), dim_type_compound).write();
+                    let dim_bytes = pumpkin_nbt::Nbt::new(String::new(), dim_type_compound)
+                        .write()
+                        .map_err(|error| WritingError::Message(error.to_string()))?;
                     write.write_all(&dim_bytes)?;
                 } else {
                     // In 1.16 - 1.16.1 and 1.19 - 1.20.1, this field is the dimension Identifier string

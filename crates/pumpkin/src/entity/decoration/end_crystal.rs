@@ -1,12 +1,6 @@
-use core::f32;
-
-use crate::entity::{Entity, EntityBase, EntityBaseFuture, living::LivingEntity};
-use pumpkin_data::{
-    damage::DamageType,
-    tag::{self, Taggable},
-};
+use crate::entity::{DamageContext, Entity, EntityBase, EntityBaseFuture, living::LivingEntity};
+use pumpkin_data::tag::{self, Taggable};
 use pumpkin_protocol::java::client::play::Metadata;
-use pumpkin_util::math::vector3::Vector3;
 
 pub struct EndCrystalEntity {
     entity: Entity,
@@ -41,14 +35,11 @@ impl EntityBase for EndCrystalEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        _amount: f32,
-        damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        _source: Option<&'a dyn EntityBase>,
-        _cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
+            let damage_type = context.damage_type();
             self.entity.remove().await;
             if !damage_type.has_tag(&tag::DamageType::MINECRAFT_IS_EXPLOSION) {
                 self.entity

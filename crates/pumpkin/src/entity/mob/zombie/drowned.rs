@@ -3,8 +3,10 @@ use std::sync::Arc;
 use crate::entity::mob::zombie::ZombieEntityBase;
 use crate::entity::{
     Entity, NbtFuture,
+    ai::goal::revenge::{EntityTypeFilter, RevengeGoal},
     mob::{Mob, MobEntity},
 };
+use pumpkin_data::entity::EntityType;
 use pumpkin_nbt::compound::NbtCompound;
 
 pub struct DrownedEntity {
@@ -16,20 +18,24 @@ impl DrownedEntity {
         let entity = ZombieEntityBase::new(entity);
         let zombie = Self { entity };
         let mob_arc = Arc::new(zombie);
-        // Fix duplicated since already in ZombieEntity::new()
-        {
-            //let mut target_selector = mob_arc.entity.mob_entity.target_selector.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-
-            // TODO
-            // target_selector.add_goal(
-            //     2,
-            //     ActiveTargetGoal::with_default(
-            //         &mob_arc.entity.mob_entity,
-            //         &EntityType::PLAYER,
-            //         true,
-            //     ),
-            // );
-        };
+        let mut target_selector = mob_arc
+            .entity
+            .mob_entity
+            .target_selector
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        target_selector.remove_goal_sync::<RevengeGoal>();
+        target_selector.add_goal(
+            1,
+            Box::new(
+                RevengeGoal::new(true)
+                    .ignore_damage_from(&[EntityTypeFilter::Exact(&EntityType::DROWNED)])
+                    .set_alert_others_except(&[EntityTypeFilter::Exact(
+                        &EntityType::ZOMBIFIED_PIGLIN,
+                    )]),
+            ),
+        );
+        drop(target_selector);
 
         mob_arc
     }
@@ -38,7 +44,26 @@ impl DrownedEntity {
     pub fn with_can_break_doors(entity: Entity, can_break_doors: bool) -> Arc<Self> {
         let entity = ZombieEntityBase::with_can_break_doors(entity, can_break_doors);
         let zombie = Self { entity };
-        Arc::new(zombie)
+        let mob_arc = Arc::new(zombie);
+        let mut target_selector = mob_arc
+            .entity
+            .mob_entity
+            .target_selector
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        target_selector.remove_goal_sync::<RevengeGoal>();
+        target_selector.add_goal(
+            1,
+            Box::new(
+                RevengeGoal::new(true)
+                    .ignore_damage_from(&[EntityTypeFilter::Exact(&EntityType::DROWNED)])
+                    .set_alert_others_except(&[EntityTypeFilter::Exact(
+                        &EntityType::ZOMBIFIED_PIGLIN,
+                    )]),
+            ),
+        );
+        drop(target_selector);
+        mob_arc
     }
 }
 

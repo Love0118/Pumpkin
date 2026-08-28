@@ -89,9 +89,10 @@ impl ToFromWasmEvent for ChunkLoad {
                     light_populated: std::sync::atomic::AtomicBool::new(false),
                     status: pumpkin_data::chunk::ChunkStatus::Empty,
                     blending_data: None,
-                    dirty: std::sync::atomic::AtomicBool::new(false),
+                    dirty: pumpkin_world::chunk::DirtyState::new(false),
                     inhabited_time: std::sync::atomic::AtomicU64::new(0),
                     custom_data: std::sync::Mutex::new(pumpkin_nbt::compound::NbtCompound::new()),
+                    residual_nbt: std::sync::Mutex::new(pumpkin_nbt::compound::NbtCompound::new()),
                 };
                 Self {
                     world,
@@ -139,9 +140,10 @@ impl ToFromWasmEvent for ChunkSave {
                     light_populated: std::sync::atomic::AtomicBool::new(false),
                     status: pumpkin_data::chunk::ChunkStatus::Empty,
                     blending_data: None,
-                    dirty: std::sync::atomic::AtomicBool::new(false),
+                    dirty: pumpkin_world::chunk::DirtyState::new(false),
                     inhabited_time: std::sync::atomic::AtomicU64::new(0),
                     custom_data: std::sync::Mutex::new(pumpkin_nbt::compound::NbtCompound::new()),
+                    residual_nbt: std::sync::Mutex::new(pumpkin_nbt::compound::NbtCompound::new()),
                 };
                 Self {
                     world,
@@ -188,9 +190,10 @@ impl ToFromWasmEvent for ChunkSend {
                     light_populated: std::sync::atomic::AtomicBool::new(false),
                     status: pumpkin_data::chunk::ChunkStatus::Empty,
                     blending_data: None,
-                    dirty: std::sync::atomic::AtomicBool::new(false),
+                    dirty: pumpkin_world::chunk::DirtyState::new(false),
                     inhabited_time: std::sync::atomic::AtomicU64::new(0),
                     custom_data: std::sync::Mutex::new(pumpkin_nbt::compound::NbtCompound::new()),
+                    residual_nbt: std::sync::Mutex::new(pumpkin_nbt::compound::NbtCompound::new()),
                 };
                 Self {
                     world,

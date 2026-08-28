@@ -19,7 +19,7 @@ pub fn push_wit_nbt_tag(tag: NbtTag, tags: &mut Vec<WitNbtTag>) -> u32 {
         NbtTag::Float(value) => WitNbtTag::Float(value),
         NbtTag::Double(value) => WitNbtTag::Double(value),
         NbtTag::ByteArray(value) => WitNbtTag::ByteArray(value.into_vec()),
-        NbtTag::String(value) => WitNbtTag::StringTag(value.into()),
+        NbtTag::String(value) => WitNbtTag::StringTag(value.to_string()),
         NbtTag::List(value) => WitNbtTag::ListTag(
             value
                 .into_iter()

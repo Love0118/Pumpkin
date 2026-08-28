@@ -3,21 +3,41 @@
 use crate::deserializer::NbtReadHelperJava;
 use crate::{Error, Nbt, NbtCompound};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use std::io::{Cursor, Read, Seek, Write};
+use std::io::{Read, Seek, Write};
+
+const MAX_DECOMPRESSED_NBT_SIZE: usize = 64 * 1024 * 1024;
 
 /// Reads a gzip-compressed, named NBT compound from a seekable reader.
 ///
 /// Decompressed data is limited to 64 MiB.
 pub fn read_gzip_compound_tag(input: impl Read + Seek) -> Result<NbtCompound, Error> {
-    // Create a GZip decoder and directly chain it to the NBT reader
-    let mut decoder = GzDecoder::new(input).take(64 * 1024 * 1024); // 64 MB limit
-    let mut buf = Vec::new();
-    decoder.read_to_end(&mut buf).map_err(Error::Incomplete)?;
-    let mut reader = NbtReadHelperJava::new(Cursor::new(buf));
+    read_gzip_compound_tag_with_limit(input, MAX_DECOMPRESSED_NBT_SIZE)
+}
 
-    // Read the NBT data directly from the decoder stream
-    let nbt = Nbt::read(&mut reader)?;
-    Ok(nbt.root_tag)
+/// Reads a gzip-compressed named compound with a caller-provided decompressed-byte limit.
+pub fn read_gzip_compound_tag_with_limit(
+    input: impl Read + Seek,
+    max_decompressed_size: usize,
+) -> Result<NbtCompound, Error> {
+    let read_limit = u64::try_from(max_decompressed_size)
+        .map_err(|_| Error::LargeLength(max_decompressed_size))?
+        .saturating_add(1);
+    let mut decoder = GzDecoder::new(input).take(read_limit);
+
+    let parsed = {
+        let mut reader = NbtReadHelperJava::new(crate::deserializer::NbtStreamReader(&mut decoder));
+        Nbt::read(&mut reader)
+    };
+
+    if parsed.is_ok() {
+        std::io::copy(&mut decoder, &mut std::io::sink()).map_err(Error::Incomplete)?;
+    }
+
+    if decoder.limit() == 0 {
+        return Err(Error::LargeLength(max_decompressed_size.saturating_add(1)));
+    }
+
+    Ok(parsed?.root_tag)
 }
 
 /// Writes a named NBT compound with gzip compression.
@@ -29,8 +49,7 @@ pub fn write_gzip_compound_tag(compound: NbtCompound, output: impl Write) -> Res
 
     // Create an NBT wrapper and write directly to the encoder
     let nbt = Nbt::new(String::new(), compound);
-    nbt.write_to_writer(&mut encoder)
-        .map_err(Error::Incomplete)?;
+    nbt.write_to_writer(&mut encoder)?;
 
     // Finish the encoder to ensure all data is written
     encoder.finish().map_err(Error::Incomplete)?;
@@ -56,8 +75,11 @@ mod tests {
         },
         tag::NbtTag,
     };
+    use flate2::{Compression, write::GzEncoder};
     use std::fs::File;
-    use std::io::Cursor;
+    use std::io::{Cursor, Write};
+
+    use super::read_gzip_compound_tag_with_limit;
 
     #[test]
     fn gzip_read_write_compound() {
@@ -174,5 +196,49 @@ mod tests {
             read_gzip_compound_tag(file).expect("Failed to read compound from file");
 
         assert_eq!(read_compound.get_int("test_value"), Some(42));
+    }
+
+    #[test]
+    fn gzip_rejects_decompressed_payload_over_limit() {
+        let nbt_bytes = crate::Nbt::from(NbtCompound::new())
+            .write()
+            .expect("empty NBT should serialize");
+        let limit = nbt_bytes.len() + 8;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(&nbt_bytes)
+            .expect("NBT bytes should compress");
+        encoder
+            .write_all(&[0; 16])
+            .expect("trailing payload should compress");
+        let compressed = encoder.finish().expect("gzip stream should finish");
+
+        let error = read_gzip_compound_tag_with_limit(Cursor::new(compressed), limit)
+            .expect_err("payload above the decompressed limit must fail");
+        assert!(matches!(error, crate::Error::LargeLength(length) if length == limit + 1));
+    }
+
+    #[test]
+    fn gzip_accepts_payload_at_exact_decompressed_limit() {
+        let mut compound = NbtCompound::new();
+        compound.put_string("value", "exact-limit");
+        let nbt_bytes = crate::Nbt::from(compound.clone()).write().unwrap();
+        let compressed = write_gzip_compound_tag_to_bytes(compound).unwrap();
+
+        let decoded = read_gzip_compound_tag_with_limit(Cursor::new(compressed), nbt_bytes.len())
+            .expect("payload at the exact decompressed limit should pass");
+
+        assert_eq!(decoded.get_string("value"), Some("exact-limit"));
+    }
+
+    #[test]
+    fn truncated_gzip_is_rejected() {
+        let mut compound = NbtCompound::new();
+        compound.put("payload", NbtTag::ByteArray(vec![7; 4096].into()));
+        let mut compressed = write_gzip_compound_tag_to_bytes(compound).unwrap();
+        compressed.truncate(compressed.len() / 2);
+
+        assert!(read_gzip_compound_tag(Cursor::new(compressed)).is_err());
     }
 }

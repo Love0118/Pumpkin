@@ -15,7 +15,7 @@ use rand::RngExt;
 use uuid::Uuid;
 
 use crate::entity::mob::shulker::Axis;
-use crate::entity::{Entity, EntityBase, EntityBaseFuture};
+use crate::entity::{DamageContext, Entity, EntityBase, EntityBaseFuture};
 use crate::server::Server;
 
 // Direction ordinal constants
@@ -286,12 +286,8 @@ impl EntityBase for ShulkerBulletEntity {
     /// Any hit destroys the bullet (melee, arrow, etc.).
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        _amount: f32,
-        _damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        _source: Option<&'a dyn EntityBase>,
-        _cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        _context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
             // Guard against double-hit
@@ -501,15 +497,13 @@ impl EntityBase for ShulkerBulletEntity {
 
                 // Deal 4 (MOB_PROJECTILE) damage
                 let owner_arc = world.get_entity_by_id(self.owner_id);
+                let mut context = DamageContext::new(4.0, DamageType::MOB_PROJECTILE)
+                    .with_direct_entity(caller.as_ref());
+                if let Some(owner) = owner_arc.as_deref() {
+                    context = context.with_causing_entity(owner);
+                }
                 let damaged = hit_entity
-                    .damage_with_context(
-                        hit_entity.as_ref(),
-                        4.0,
-                        DamageType::MOB_PROJECTILE,
-                        None,
-                        owner_arc.as_deref(),
-                        Some(caller.as_ref()),
-                    )
+                    .damage_with_context(hit_entity.as_ref(), context)
                     .await;
 
                 if damaged {

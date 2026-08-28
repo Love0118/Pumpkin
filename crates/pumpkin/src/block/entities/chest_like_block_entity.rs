@@ -48,14 +48,14 @@ macro_rules! impl_block_entity_for_chest {
                 &'a self,
                 nbt: &'a mut pumpkin_nbt::compound::NbtCompound,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-                use pumpkin_world::inventory::Inventory;
-
                 Box::pin(async move {
-                    // Clone the loot table key without holding the lock across an await.
-                    let loot_table_key = {
-                        let guard = self.loot_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        guard.clone()
-                    };
+                    let items = self.items.read().await;
+                    let loot_table_key = self
+                        .loot_table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    let items = items.clone();
 
                     if let Some(key) = loot_table_key {
                         // Persist deferred loot: write the key and seed; skip items.
@@ -65,7 +65,7 @@ macro_rules! impl_block_entity_for_chest {
                         }
                     } else {
                         // Loot has already been generated, so persist the actual items.
-                        self.write_inventory_nbt(nbt, true).await;
+                        pumpkin_world::inventory::sync_write_items_to_nbt(&items, nbt);
                     }
                 })
             }
@@ -99,15 +99,15 @@ macro_rules! impl_block_entity_for_chest {
             }
 
             fn chunk_data_nbt(&self) -> Option<pumpkin_nbt::compound::NbtCompound> {
+                let items = self.items.try_read().ok()?.clone();
+                let loot_table_key = self
+                    .loot_table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 let mut nbt = pumpkin_nbt::compound::NbtCompound::new();
-                let has_loot_table = self.loot_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some();
-                if !has_loot_table {
-                    if let Ok(items) = self.items.try_read() {
-                        pumpkin_world::inventory::sync_write_items_to_nbt(&*items, &mut nbt);
-                    } else {
-                        let items = futures::executor::block_on(self.items.read());
-                        pumpkin_world::inventory::sync_write_items_to_nbt(&*items, &mut nbt);
-                    }
+                if loot_table_key.is_none() {
+                    pumpkin_world::inventory::sync_write_items_to_nbt(&items, &mut nbt);
                 }
                 Some(nbt)
             }
@@ -135,6 +135,12 @@ macro_rules! impl_inventory_for_chest {
         impl pumpkin_world::inventory::Inventory for $struct_name {
             fn size(&self) -> usize {
                 Self::INVENTORY_SIZE
+            }
+
+            fn snapshot_stacks(
+                &self,
+            ) -> pumpkin_world::inventory::InventoryFuture<'_, Vec<ItemStack>> {
+                Box::pin(async move { self.items.read().await.to_vec() })
             }
 
             fn is_empty(&self) -> pumpkin_world::inventory::InventoryFuture<'_, bool> {

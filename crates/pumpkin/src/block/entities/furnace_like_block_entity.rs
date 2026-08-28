@@ -275,6 +275,12 @@ macro_rules! impl_inventory_for_cooking {
                 Self::INVENTORY_SIZE
             }
 
+            fn snapshot_stacks(
+                &self,
+            ) -> pumpkin_world::inventory::InventoryFuture<'_, Vec<ItemStack>> {
+                Box::pin(async move { self.items.read().await.to_vec() })
+            }
+
             fn is_empty(&self) -> pumpkin_world::inventory::InventoryFuture<'_, bool> {
                 Box::pin(async move {
                     let items = self.items.read().await;
@@ -591,34 +597,34 @@ macro_rules! impl_block_entity_for_cooking {
                 nbt: &'a mut pumpkin_nbt::compound::NbtCompound,
             ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
                 Box::pin(async move {
+                    let items = self.items.read().await;
+                    let recipes = self
+                        .recipes_used
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    let items = items.clone();
                     nbt.put_short("cooking_total_time", self.get_cooking_total_time() as i16);
                     nbt.put_short("cooking_time_spent", self.get_cooking_time_spent() as i16);
                     nbt.put_short("lit_total_time", self.get_lit_total_time() as i16);
                     nbt.put_short("lit_time_remaining", self.get_lit_time_remaining() as i16);
 
-                    // Save RecipesUsed in vanilla format (map of recipe ID -> craft count)
-                    // Scope the mutex guard so it's dropped before the await
-                    {
-                        let recipes = self
-                            .recipes_used
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if !recipes.is_empty() {
-                            let mut recipes_compound = pumpkin_nbt::compound::NbtCompound::new();
-                            for (recipe_id, count) in recipes.iter() {
-                                recipes_compound.put(
-                                    recipe_id.as_str(),
-                                    pumpkin_nbt::tag::NbtTag::Int(*count as i32),
-                                );
-                            }
-                            nbt.put(
-                                "RecipesUsed",
-                                pumpkin_nbt::tag::NbtTag::Compound(recipes_compound),
+                    // Save RecipesUsed in vanilla format (map of recipe ID -> craft count).
+                    if !recipes.is_empty() {
+                        let mut recipes_compound = pumpkin_nbt::compound::NbtCompound::new();
+                        for (recipe_id, count) in &recipes {
+                            recipes_compound.put(
+                                recipe_id.as_str(),
+                                pumpkin_nbt::tag::NbtTag::Int(*count as i32),
                             );
                         }
+                        nbt.put(
+                            "RecipesUsed",
+                            pumpkin_nbt::tag::NbtTag::Compound(recipes_compound),
+                        );
                     }
 
-                    self.write_inventory_nbt(nbt, true).await;
+                    pumpkin_world::inventory::sync_write_items_to_nbt(&items, nbt);
                 })
             }
 
@@ -633,31 +639,33 @@ macro_rules! impl_block_entity_for_cooking {
             }
 
             fn chunk_data_nbt(&self) -> Option<pumpkin_nbt::compound::NbtCompound> {
+                let items = self.items.try_read().ok()?.clone();
+                let recipes = self
+                    .recipes_used
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 let mut nbt = pumpkin_nbt::compound::NbtCompound::new();
                 nbt.put_short("cooking_total_time", self.get_cooking_total_time() as i16);
                 nbt.put_short("cooking_time_spent", self.get_cooking_time_spent() as i16);
                 nbt.put_short("lit_total_time", self.get_lit_total_time() as i16);
                 nbt.put_short("lit_time_remaining", self.get_lit_time_remaining() as i16);
 
-                if let Ok(recipes) = self.recipes_used.lock() {
-                    if !recipes.is_empty() {
-                        let mut recipes_compound = pumpkin_nbt::compound::NbtCompound::new();
-                        for (recipe_id, count) in recipes.iter() {
-                            recipes_compound.put(
-                                recipe_id.as_str(),
-                                pumpkin_nbt::tag::NbtTag::Int(*count as i32),
-                            );
-                        }
-                        nbt.put(
-                            "RecipesUsed",
-                            pumpkin_nbt::tag::NbtTag::Compound(recipes_compound),
+                if !recipes.is_empty() {
+                    let mut recipes_compound = pumpkin_nbt::compound::NbtCompound::new();
+                    for (recipe_id, count) in &recipes {
+                        recipes_compound.put(
+                            recipe_id.as_str(),
+                            pumpkin_nbt::tag::NbtTag::Int(*count as i32),
                         );
                     }
+                    nbt.put(
+                        "RecipesUsed",
+                        pumpkin_nbt::tag::NbtTag::Compound(recipes_compound),
+                    );
                 }
 
-                if let Ok(guard) = self.items.try_read() {
-                    pumpkin_world::inventory::sync_write_items_to_nbt(&*guard, &mut nbt);
-                }
+                pumpkin_world::inventory::sync_write_items_to_nbt(&items, &mut nbt);
                 Some(nbt)
             }
 

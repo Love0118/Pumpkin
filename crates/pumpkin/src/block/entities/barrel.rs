@@ -193,6 +193,10 @@ impl Inventory for BarrelBlockEntity {
         })
     }
 
+    fn snapshot_stacks(&self) -> InventoryFuture<'_, Vec<ItemStack>> {
+        Box::pin(async move { self.items.read().await.to_vec() })
+    }
+
     fn remove_stack(&self, slot: usize) -> InventoryFuture<'_, ItemStack> {
         Box::pin(async move {
             let mut items = self.items.write().await;

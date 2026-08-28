@@ -7,9 +7,26 @@ use tokio::sync::Mutex;
 
 pub struct BrushableBlockBlockEntity {
     pub position: BlockPos,
-    pub item: Mutex<Option<ItemStack>>,
-    pub hits: Mutex<i32>,
-    pub direction: Mutex<u8>,
+    state: Mutex<BrushableBlockState>,
+}
+
+#[derive(Clone, Default)]
+struct BrushableBlockState {
+    item: Option<ItemStack>,
+    hits: i32,
+    direction: u8,
+}
+
+impl BrushableBlockState {
+    fn write_nbt(self, nbt: &mut NbtCompound) {
+        if let Some(item) = self.item {
+            let mut item_nbt = NbtCompound::new();
+            item.write_item_stack(&mut item_nbt);
+            nbt.put_compound("item", item_nbt);
+        }
+        nbt.put_int("hits", self.hits);
+        nbt.put_byte("direction", self.direction as i8);
+    }
 }
 
 impl BlockEntity for BrushableBlockBlockEntity {
@@ -32,9 +49,11 @@ impl BlockEntity for BrushableBlockBlockEntity {
         let direction = nbt.get_byte("direction").unwrap_or(0) as u8;
         Self {
             position,
-            item: Mutex::new(item),
-            hits: Mutex::new(hits),
-            direction: Mutex::new(direction),
+            state: Mutex::new(BrushableBlockState {
+                item,
+                hits,
+                direction,
+            }),
         }
     }
 
@@ -43,27 +62,13 @@ impl BlockEntity for BrushableBlockBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(it) = self.item.lock().await.as_ref() {
-                let mut it_nbt = NbtCompound::new();
-                it.write_item_stack(&mut it_nbt);
-                nbt.put_compound("item", it_nbt);
-            }
-            nbt.put_int("hits", *self.hits.lock().await);
-            nbt.put_byte("direction", *self.direction.lock().await as i8);
+            self.state.lock().await.clone().write_nbt(nbt);
         })
     }
 
     fn chunk_data_nbt(&self) -> Option<NbtCompound> {
         let mut nbt = NbtCompound::new();
-        if let Ok(item) = self.item.try_lock()
-            && let Some(ref it) = *item
-        {
-            let mut it_nbt = NbtCompound::new();
-            it.write_item_stack(&mut it_nbt);
-            nbt.put_compound("item", it_nbt);
-        }
-        nbt.put_int("hits", *self.hits.try_lock().ok()?);
-        nbt.put_byte("direction", *self.direction.try_lock().ok()? as i8);
+        self.state.try_lock().ok()?.clone().write_nbt(&mut nbt);
         Some(nbt)
     }
 
@@ -78,9 +83,22 @@ impl BrushableBlockBlockEntity {
     pub const fn new(position: BlockPos) -> Self {
         Self {
             position,
-            item: Mutex::const_new(None),
-            hits: Mutex::const_new(0),
-            direction: Mutex::const_new(0),
+            state: Mutex::const_new(BrushableBlockState {
+                item: None,
+                hits: 0,
+                direction: 0,
+            }),
         }
+    }
+
+    pub async fn apply_brush_hit(&self) -> (i32, Option<ItemStack>) {
+        let mut state = self.state.lock().await;
+        state.hits += 1;
+        let item = (state.hits >= 4).then(|| state.item.take()).flatten();
+        (state.hits, item)
+    }
+
+    pub async fn take_item(&self) -> Option<ItemStack> {
+        self.state.lock().await.item.take()
     }
 }

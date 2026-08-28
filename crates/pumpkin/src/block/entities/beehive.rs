@@ -7,8 +7,28 @@ use tokio::sync::Mutex;
 
 pub struct BeehiveBlockEntity {
     pub position: BlockPos,
-    pub bees: Mutex<Option<Vec<NbtTag>>>,
-    pub flower_pos: Mutex<Option<BlockPos>>,
+    state: Mutex<BeehiveState>,
+}
+
+#[derive(Clone, Default)]
+struct BeehiveState {
+    bees: Option<Vec<NbtTag>>,
+    flower_pos: Option<BlockPos>,
+}
+
+impl BeehiveState {
+    fn write_nbt(self, nbt: &mut NbtCompound) {
+        if let Some(bees) = self.bees {
+            nbt.put_list("Bees", bees);
+        }
+        if let Some(flower_pos) = self.flower_pos {
+            let mut flower_nbt = NbtCompound::new();
+            flower_nbt.put_int("X", flower_pos.0.x);
+            flower_nbt.put_int("Y", flower_pos.0.y);
+            flower_nbt.put_int("Z", flower_pos.0.z);
+            nbt.put_compound("FlowerPos", flower_nbt);
+        }
+    }
 }
 
 impl BlockEntity for BeehiveBlockEntity {
@@ -34,8 +54,7 @@ impl BlockEntity for BeehiveBlockEntity {
         });
         Self {
             position,
-            bees: Mutex::new(bees),
-            flower_pos: Mutex::new(flower_pos),
+            state: Mutex::new(BeehiveState { bees, flower_pos }),
         }
     }
 
@@ -44,35 +63,13 @@ impl BlockEntity for BeehiveBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(b) = self.bees.lock().await.as_ref() {
-                nbt.put_list("Bees", b.clone());
-            }
-            if let Some(fp) = self.flower_pos.lock().await.as_ref() {
-                let mut fp_nbt = NbtCompound::new();
-                fp_nbt.put_int("X", fp.0.x);
-                fp_nbt.put_int("Y", fp.0.y);
-                fp_nbt.put_int("Z", fp.0.z);
-                nbt.put_compound("FlowerPos", fp_nbt);
-            }
+            self.state.lock().await.clone().write_nbt(nbt);
         })
     }
 
     fn chunk_data_nbt(&self) -> Option<NbtCompound> {
         let mut nbt = NbtCompound::new();
-        if let Ok(bees) = self.bees.try_lock()
-            && let Some(ref b) = *bees
-        {
-            nbt.put_list("Bees", b.clone());
-        }
-        if let Ok(flower_pos) = self.flower_pos.try_lock()
-            && let Some(ref fp) = *flower_pos
-        {
-            let mut fp_nbt = NbtCompound::new();
-            fp_nbt.put_int("X", fp.0.x);
-            fp_nbt.put_int("Y", fp.0.y);
-            fp_nbt.put_int("Z", fp.0.z);
-            nbt.put_compound("FlowerPos", fp_nbt);
-        }
+        self.state.try_lock().ok()?.clone().write_nbt(&mut nbt);
         Some(nbt)
     }
 
@@ -87,8 +84,17 @@ impl BeehiveBlockEntity {
     pub const fn new(position: BlockPos) -> Self {
         Self {
             position,
-            bees: Mutex::const_new(None),
-            flower_pos: Mutex::const_new(None),
+            state: Mutex::const_new(BeehiveState {
+                bees: None,
+                flower_pos: None,
+            }),
         }
+    }
+
+    pub fn try_bee_count(&self) -> Option<usize> {
+        self.state
+            .try_lock()
+            .ok()
+            .map(|state| state.bees.as_ref().map_or(0, Vec::len))
     }
 }

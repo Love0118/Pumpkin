@@ -391,7 +391,7 @@ impl MapLike for NbtMapLike<'_> {
         self.compound
             .child_tags
             .iter()
-            .map(|(k, v)| (NbtTag::String(k.clone()), v))
+            .map(|(k, v)| (NbtTag::String(k.clone().into()), v))
     }
 }
 

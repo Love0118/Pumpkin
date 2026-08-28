@@ -32,13 +32,8 @@ impl EvokerFangsEntity {
 }
 
 impl EntityBase for EvokerFangsEntity {
-    fn write_custom_nbt<'a>(
-        &'a self,
-        nbt: &'a mut pumpkin_nbt::compound::NbtCompound,
-    ) -> NbtFuture<'a, ()> {
-        Box::pin(async move {
-            nbt.put_int("Warmup", self.warmup_ticks.load(Ordering::Relaxed) as i32);
-        })
+    fn write_custom_nbt(&self, nbt: &mut pumpkin_nbt::compound::NbtCompound) {
+        nbt.put_int("Warmup", self.warmup_ticks.load(Ordering::Relaxed) as i32);
     }
 
     fn read_custom_nbt<'a>(

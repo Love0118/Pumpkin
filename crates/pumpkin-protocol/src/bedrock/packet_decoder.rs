@@ -1,6 +1,7 @@
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 use async_compression::tokio::bufread::DeflateDecoder;
+use bytes::Bytes;
 use tokio::io::BufReader;
 
 use crate::{
@@ -33,7 +34,7 @@ impl BedrockBatchDecoder {
     pub async fn get_packet_payload(
         &mut self,
         full_packet: Vec<u8>,
-    ) -> Result<Vec<u8>, PacketDecodeError> {
+    ) -> Result<Bytes, PacketDecodeError> {
         if full_packet.is_empty() {
             return Err(PacketDecodeError::MalformedLength("Empty packet".into()));
         }
@@ -47,7 +48,7 @@ impl BedrockBatchDecoder {
             )));
         }
 
-        let full_packet_payload = &full_packet[1..];
+        let full_packet_payload = Bytes::from(full_packet).slice(1..);
 
         // If compression is NOT enabled yet, the payload starts at index 0 of full_packet_payload
         if self.compression.is_none() {
@@ -55,7 +56,7 @@ impl BedrockBatchDecoder {
             if payload.len() > MAX_PACKET_DATA_SIZE {
                 return Err(PacketDecodeError::TooLong);
             }
-            return Ok(payload.to_vec());
+            return Ok(payload);
         }
 
         // If compression IS enabled, Bedrock expects a compression method byte at index 0 of full_packet_payload.
@@ -78,15 +79,15 @@ impl BedrockBatchDecoder {
                 if decompressed.len() > MAX_PACKET_DATA_SIZE {
                     return Err(PacketDecodeError::TooLong);
                 }
-                Ok(decompressed)
+                Ok(decompressed.into())
             }
             0xff => {
                 // None (Compression enabled but this specific packet is raw)
-                let payload = &full_packet_payload[data_start..];
+                let payload = full_packet_payload.slice(data_start..);
                 if payload.len() > MAX_PACKET_DATA_SIZE {
                     return Err(PacketDecodeError::TooLong);
                 }
-                Ok(payload.to_vec())
+                Ok(payload)
             }
             _ => Err(PacketDecodeError::FailedDecompression(format!(
                 "Unsupported compression method: 0x{compression_method:02x}"
@@ -96,7 +97,7 @@ impl BedrockBatchDecoder {
 
     pub fn get_game_packet(
         &mut self,
-        decompressed_reader: &mut Cursor<Vec<u8>>,
+        decompressed_reader: &mut Cursor<Bytes>,
     ) -> Result<RawPacket, PacketDecodeError> {
         let packet_len = VarUInt::decode(decompressed_reader).map_err(|err| match err {
             ReadingError::CleanEOF(_) => PacketDecodeError::ConnectionClosed,
@@ -134,14 +135,16 @@ impl BedrockBatchDecoder {
             )));
         }
 
-        let mut payload = vec![0; payload_len].into_boxed_slice();
-        decompressed_reader
-            .read_exact(&mut payload)
-            .map_err(|err| PacketDecodeError::FailedDecompression(err.to_string()))?;
+        let payload_start = decompressed_reader.position() as usize;
+        let payload_end = payload_start + payload_len;
+        let payload = decompressed_reader
+            .get_ref()
+            .slice(payload_start..payload_end);
+        decompressed_reader.set_position(payload_end as u64);
 
         Ok(RawPacket {
             id: i32::from(gamepacket_id),
-            payload: payload.into(),
+            payload,
         })
     }
 }
@@ -170,7 +173,7 @@ mod tests {
             )
             .expect("encode Bedrock game packet");
 
-        let mut cursor = Cursor::new(wire_buf[1..].to_vec());
+        let mut cursor = Cursor::new(Bytes::from(wire_buf).slice(1..));
         let mut decoder = BedrockBatchDecoder::new();
 
         let packet = decoder
@@ -180,5 +183,36 @@ mod tests {
         assert_eq!(packet.id, 0x01);
         assert_eq!(packet.payload.len(), PAYLOAD_LEN);
         assert_eq!(packet.payload.as_ref(), payload.as_slice());
+    }
+
+    #[tokio::test]
+    async fn raw_batch_and_inner_packet_share_backing_storage() {
+        let payload = vec![0x3c; 64];
+        let mut wire_buf = Vec::new();
+        BedrockBatchEncoder::new()
+            .write_game_packet(
+                0x01,
+                SubClient::Main,
+                SubClient::Main,
+                &payload,
+                &mut wire_buf,
+            )
+            .expect("encode Bedrock game packet");
+        let expected_batch_pointer = wire_buf.as_ptr().wrapping_add(1);
+
+        let mut decoder = BedrockBatchDecoder::new();
+        let batch = decoder
+            .get_packet_payload(wire_buf)
+            .await
+            .expect("decode raw Bedrock batch");
+        assert_eq!(batch.as_ptr(), expected_batch_pointer);
+
+        let mut cursor = Cursor::new(batch.clone());
+        let packet = decoder
+            .get_game_packet(&mut cursor)
+            .expect("decode inner Bedrock packet");
+        let expected_payload_pointer = batch.as_ptr().wrapping_add(batch.len() - payload.len());
+        assert_eq!(packet.payload.as_ptr(), expected_payload_pointer);
+        assert_eq!(packet.payload.as_ref(), payload);
     }
 }

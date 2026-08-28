@@ -124,7 +124,11 @@ impl Goal for RangedAttackGoal {
             let target_pos = target.get_entity().pos.load();
             let target_dist_sq = mob_pos.squared_distance_to_vec(&target_pos);
 
-            let has_line_of_sight = true;
+            let has_line_of_sight = mob
+                .get_mob_entity()
+                .sensing
+                .has_line_of_sight(mob.get_entity(), target.get_entity())
+                .await;
             if has_line_of_sight {
                 self.see_time += 1;
             } else {

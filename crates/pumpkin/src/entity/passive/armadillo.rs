@@ -17,9 +17,9 @@ use crate::entity::{
     Entity, EntityBase, EntityBaseFuture, NbtFuture,
     ageable::{AgeableData, AgeableMob},
     ai::goal::{
-        breed::BreedGoal, escape_danger::EscapeDangerGoal, follow_parent::FollowParentGoal,
-        look_around::RandomLookAroundGoal, look_at_entity::LookAtEntityGoal, swim::SwimGoal,
-        tempt::TemptGoal, wander_around::WanderAroundGoal,
+        breed::BreedGoal, follow_parent::FollowParentGoal, look_around::RandomLookAroundGoal,
+        look_at_entity::LookAtEntityGoal, swim::SwimGoal, tempt::TemptGoal,
+        wander_around::WanderAroundGoal,
     },
     item::ItemEntity,
     mob::{Mob, MobEntity},
@@ -147,7 +147,6 @@ impl ArmadilloEntity {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
             goal_selector.add_goal(0, Box::new(SwimGoal::default()));
-            goal_selector.add_goal(1, EscapeDangerGoal::new(2.0));
             goal_selector.add_goal(2, BreedGoal::new(1.0));
             goal_selector.add_goal(3, Box::new(TemptGoal::new(1.25, ARMADILLO_FOOD)));
             goal_selector.add_goal(4, Box::new(FollowParentGoal::new(1.1)));

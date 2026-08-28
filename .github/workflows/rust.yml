@@ -141,6 +141,32 @@ jobs:
           name: pumpkin-${{ runner.arch }}-${{ runner.os }}
           compression-level: 9
           path: dist/pumpkin-*
+  serialization_acceptance:
+    name: Serialization release acceptance
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: [clippy_release]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - run: rustup update stable && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run release acceptance benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p benchmark-results
+          cargo bench -p pumpkin-nbt --bench nbt -- --quick 2>&1 | tee benchmark-results/nbt.txt
+          cargo bench -p pumpkin-protocol --bench entity_metadata -- --quick 2>&1 | tee benchmark-results/entity-metadata.txt
+          cargo bench -p pumpkin-world --bench chunk_io -- --quick 2>&1 | tee benchmark-results/chunk-io.txt
+          cargo bench -p pumpkin --bench block_entity_snapshot -- --quick 2>&1 | tee benchmark-results/block-entity-snapshot.txt
+      - name: Export benchmark results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: serialization-acceptance-${{ github.sha }}
+          path: benchmark-results/
   draft_release:
     permissions:
       contents: write

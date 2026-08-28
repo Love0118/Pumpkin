@@ -1,9 +1,11 @@
 use crate::entity::item::ItemEntity;
 use crate::entity::living::LivingEntity;
 use crate::entity::player::Player;
-use crate::{entity::EntityBaseFuture, server::Server};
+use crate::{
+    entity::{DamageContext, EntityBaseFuture},
+    server::Server,
+};
 use core::f64;
-use pumpkin_data::damage::DamageType;
 use pumpkin_data::entity::EntityType;
 use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
@@ -182,12 +184,8 @@ impl EntityBase for EyeOfEnder {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        _amount: f32,
-        _damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        _source: Option<&'a dyn EntityBase>,
-        _cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        _context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         // Eye of Ender is not attackable.
         Box::pin(async { false })

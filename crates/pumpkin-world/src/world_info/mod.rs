@@ -9,10 +9,17 @@ use thiserror::Error;
 
 pub mod anvil;
 pub mod data_files;
+pub mod schema;
 
 // Constraint: disk biome palette serialization changed in 1.21.5
 pub const MINIMUM_SUPPORTED_WORLD_DATA_VERSION: i32 = 4435; // 1.21.9
 pub const MAXIMUM_SUPPORTED_WORLD_DATA_VERSION: i32 = 4903; // 26.2
+
+#[must_use]
+pub const fn is_supported_world_data_version(data_version: i32) -> bool {
+    data_version >= MINIMUM_SUPPORTED_WORLD_DATA_VERSION
+        && data_version <= MAXIMUM_SUPPORTED_WORLD_DATA_VERSION
+}
 
 pub const MINIMUM_SUPPORTED_LEVEL_VERSION: i32 = 19132; // 1.21.9
 pub const MAXIMUM_SUPPORTED_LEVEL_VERSION: i32 = 19133; // 1.21.9

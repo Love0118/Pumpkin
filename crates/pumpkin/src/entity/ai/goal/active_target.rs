@@ -9,7 +9,6 @@ use crate::world::World;
 use pumpkin_data::attributes::Attributes;
 use pumpkin_data::entity::EntityType;
 use rand::RngExt;
-use std::future::Future;
 use std::sync::Arc;
 
 const DEFAULT_RECIPROCAL_CHANCE: i32 = 10;
@@ -23,7 +22,7 @@ pub struct ActiveTargetGoal {
 }
 
 impl ActiveTargetGoal {
-    pub fn new<F, Fut>(
+    pub fn new<F>(
         mob: &MobEntity,
         target_type: &'static EntityType,
         reciprocal_chance: i32,
@@ -32,8 +31,7 @@ impl ActiveTargetGoal {
         predicate: Option<F>,
     ) -> Self
     where
-        F: Fn(Arc<LivingEntity>, Arc<World>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = bool> + Send + 'static,
+        F: Fn(&LivingEntity, &World) -> bool + Send + Sync + 'static,
     {
         let track_target_goal = TrackTargetGoal::new(check_visibility, check_can_navigate);
         let mut target_predicate = TargetPredicate::create_attackable();
@@ -79,19 +77,25 @@ impl ActiveTargetGoal {
         self.target = target;
     }
 
-    async fn find_closest_target(&mut self, mob: &MobEntity) {
-        let follow_range = mob
+    async fn find_closest_target(&mut self, mob: &dyn Mob) {
+        let mob_entity = mob.get_mob_entity();
+        let follow_range = mob_entity
             .living_entity
             .get_attribute_value(&Attributes::FOLLOW_RANGE);
 
         // Vanilla updates the target conditions with the current follow distance on every search
         self.target_predicate.base_max_distance = follow_range;
 
-        let world = mob.living_entity.entity.world.load();
+        let world = mob_entity.living_entity.entity.world.load();
 
         // Vanilla searches using getEyeY(), so we offset the position by the eye height
-        let mut search_pos = mob.living_entity.entity.pos.load();
-        search_pos.y += mob.living_entity.entity.entity_dimension.load().eye_height as f64;
+        let mut search_pos = mob_entity.living_entity.entity.pos.load();
+        search_pos.y += mob_entity
+            .living_entity
+            .entity
+            .entity_dimension
+            .load()
+            .eye_height as f64;
 
         if self.target_type == &EntityType::PLAYER {
             let potential_player = world
@@ -102,7 +106,7 @@ impl ActiveTargetGoal {
                 && let Some(living) = potential_entity.get_living_entity()
                 && self
                     .target_predicate
-                    .test(&world, Some(&mob.living_entity), living)
+                    .test(&world, Some(mob), living, &mob_entity.sensing)
                     .await
             {
                 self.target = Some(potential_entity);
@@ -116,7 +120,7 @@ impl ActiveTargetGoal {
                 && let Some(living) = potential_entity.get_living_entity()
                 && self
                     .target_predicate
-                    .test(&world, Some(&mob.living_entity), living)
+                    .test(&world, Some(mob), living, &mob_entity.sensing)
                     .await
             {
                 self.target = Some(potential_entity);
@@ -135,7 +139,7 @@ impl Goal for ActiveTargetGoal {
             {
                 return false;
             }
-            self.find_closest_target(mob.get_mob_entity()).await;
+            self.find_closest_target(mob).await;
             self.target.is_some()
         })
     }

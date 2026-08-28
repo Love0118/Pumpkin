@@ -43,6 +43,19 @@ impl FishingBobberEntity {
         }
     }
 
+    #[must_use]
+    pub const fn orphan(entity: Entity) -> Self {
+        Self {
+            entity,
+            owner_id: 0,
+            hooked_entity_id: AtomicI32::new(0),
+            in_ground: AtomicBool::new(false),
+            has_hit: AtomicBool::new(false),
+            wait_countdown: AtomicI32::new(0),
+            bite_countdown: AtomicI32::new(0),
+        }
+    }
+
     pub async fn reel_in(&self, player: &Player) -> i32 {
         use pumpkin_data::item::Item;
         let world = self.entity.world.load();

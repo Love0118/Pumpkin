@@ -1,15 +1,54 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::chunk::format::anvil::SingleChunkDataSerializer;
-use crate::chunk::io::{ChunkSerializer, LoadedData};
+use crate::chunk::io::{ChunkSerializer, LoadedData, decompression_output_limit};
 use crate::chunk::{ChunkReadingError, ChunkWritingError};
 use bytes::Bytes;
 use pumpkin_util::math::vector2::Vector2;
 use ruzstd::decoding::StreamingDecoder;
 use ruzstd::encoding::{CompressionLevel, compress_to_vec};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+
+use crate::{
+    persistence::AsyncAtomicFile,
+    serialization_metrics::{self, SerializationStage},
+};
+
+const MAX_DECOMPRESSED_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+
+fn decompress_chunk_with_limit(
+    compressed: &[u8],
+    max_decompressed_bytes: usize,
+) -> Result<Bytes, ChunkReadingError> {
+    let output_limit = decompression_output_limit(compressed.len(), max_decompressed_bytes)
+        .map_err(ChunkReadingError::IoError)?;
+    let decoder = StreamingDecoder::new(compressed)
+        .map_err(|error| ChunkReadingError::IoError(std::io::Error::other(error.to_string())))?;
+    let mut limited = std::io::Read::take(decoder, output_limit.saturating_add(1) as u64);
+    let mut decompressed = Vec::new();
+    std::io::Read::read_to_end(&mut limited, &mut decompressed)
+        .map_err(ChunkReadingError::IoError)?;
+    if decompressed.len() > output_limit {
+        return Err(ChunkReadingError::RegionIsInvalid);
+    }
+    Ok(Bytes::from(decompressed))
+}
+
+async fn write_nbt_tag_header(
+    writer: &mut (impl AsyncWrite + Unpin),
+    tag_id: u8,
+    name: &str,
+) -> Result<(), std::io::Error> {
+    let name_len = u16::try_from(name.len())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "NBT name too long"))?;
+    writer.write_u8(tag_id).await?;
+    writer.write_u16(name_len).await?;
+    writer.write_all(name.as_bytes()).await
+}
 
 pub struct PumpFile<D> {
     pub data: PumpData,
@@ -36,6 +75,8 @@ impl<D> ChunkSerializer for PumpFile<D>
 where
     D: SingleChunkDataSerializer + Send + Sync + Sized + 'static,
 {
+    const READ_FILE_MEMORY_MULTIPLIER: usize = 3;
+
     type Data = D;
     type WriteBackend = PathBuf;
     type ChunkConfig = ();
@@ -51,18 +92,33 @@ where
     }
 
     async fn write(&self, backend: &Self::WriteBackend) -> Result<(), std::io::Error> {
-        let mut root = pumpkin_nbt::compound::NbtCompound::new();
-        root.put_int("x", self.data.x);
-        root.put_int("z", self.data.z);
-        let mut chunks_comp = pumpkin_nbt::compound::NbtCompound::new();
-        for (k, v) in &self.data.chunks {
-            let i8_vec: Vec<i8> = v.iter().map(|&b| b as i8).collect();
-            chunks_comp.put(k, pumpkin_nbt::tag::NbtTag::ByteArray(i8_vec.into()));
-        }
-        root.put_compound("chunks", chunks_comp);
+        const TAG_END: u8 = 0;
+        const TAG_INT: u8 = 3;
+        const TAG_BYTE_ARRAY: u8 = 7;
+        const TAG_COMPOUND: u8 = 10;
 
-        let bytes = pumpkin_nbt::Nbt::from(root).write_unnamed();
-        tokio::fs::write(backend, bytes).await
+        let mut file = AsyncAtomicFile::create(backend.clone()).await?;
+        file.write_u8(TAG_COMPOUND).await?;
+
+        write_nbt_tag_header(&mut file, TAG_INT, "x").await?;
+        file.write_i32(self.data.x).await?;
+        write_nbt_tag_header(&mut file, TAG_INT, "z").await?;
+        file.write_i32(self.data.z).await?;
+        write_nbt_tag_header(&mut file, TAG_COMPOUND, "chunks").await?;
+        for (key, payload) in &self.data.chunks {
+            let payload_len = i32::try_from(payload.len()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Pump chunk payload too large",
+                )
+            })?;
+            write_nbt_tag_header(&mut file, TAG_BYTE_ARRAY, key).await?;
+            file.write_i32(payload_len).await?;
+            file.write_all(payload).await?;
+        }
+        file.write_u8(TAG_END).await?;
+        file.write_u8(TAG_END).await?;
+        file.commit().await
     }
 
     fn read(r: Bytes) -> Result<Self, ChunkReadingError> {
@@ -110,8 +166,24 @@ where
             .to_bytes()
             .await
             .map_err(|e| ChunkWritingError::ChunkSerializingError(e.to_string()))?;
+        if bytes.len() > MAX_DECOMPRESSED_CHUNK_BYTES {
+            return Err(ChunkWritingError::ChunkSerializingError(format!(
+                "Pump chunk exceeds {MAX_DECOMPRESSED_CHUNK_BYTES} decompressed bytes"
+            )));
+        }
+        serialization_metrics::record_snapshot_bytes(bytes.len());
 
-        let compressed = compress_to_vec(&bytes[..], CompressionLevel::Fastest);
+        let compress_started = Instant::now();
+        let compressed = tokio::task::spawn_blocking(move || {
+            compress_to_vec(&bytes[..], CompressionLevel::Fastest)
+        })
+        .await
+        .map_err(|error| ChunkWritingError::IoError(std::io::Error::other(error)))?;
+        serialization_metrics::record_duration(
+            SerializationStage::Compress,
+            compress_started.elapsed(),
+        );
+        serialization_metrics::record_compressed_bytes(compressed.len());
 
         self.data.chunks.insert(index.to_string(), compressed);
 
@@ -131,13 +203,8 @@ where
             if let Some(chunk_bytes) = self.data.chunks.get(&index.to_string()) {
                 let chunk_bytes = chunk_bytes.clone();
                 let res = tokio::task::spawn_blocking(move || {
-                    let mut decoder = StreamingDecoder::new(&chunk_bytes[..]).map_err(|e| {
-                        ChunkReadingError::IoError(std::io::Error::other(e.to_string()))
-                    })?;
-                    let mut decompressed = Vec::new();
-                    std::io::Read::read_to_end(&mut decoder, &mut decompressed)
-                        .map_err(ChunkReadingError::IoError)?;
-                    let bytes = Bytes::from(decompressed);
+                    let bytes =
+                        decompress_chunk_with_limit(&chunk_bytes, MAX_DECOMPRESSED_CHUNK_BYTES)?;
                     D::from_bytes(&bytes, pos)
                 })
                 .await;
@@ -201,7 +268,7 @@ mod tests {
             let i8_vec: Vec<i8> = self.data.iter().map(|&b| b as i8).collect();
             root.put("data", pumpkin_nbt::tag::NbtTag::ByteArray(i8_vec.into()));
             let bytes = pumpkin_nbt::Nbt::from(root).write_unnamed();
-            Box::pin(async move { Ok(bytes) })
+            Box::pin(async move { bytes.map_err(ChunkSerializingError::from) })
         }
         fn from_bytes(bytes: &Bytes, pos: Vector2<i32>) -> Result<Self, ChunkReadingError> {
             let mut cursor = std::io::Cursor::new(bytes);
@@ -261,5 +328,36 @@ mod tests {
             }
             _ => panic!("Expected LoadedData::Loaded"),
         }
+    }
+
+    #[test]
+    fn pump_chunk_decompression_limit_rejects_overflow() {
+        let compressed = compress_to_vec(&[7u8; 129][..], CompressionLevel::Fastest);
+        assert!(decompress_chunk_with_limit(&compressed, 128).is_err());
+    }
+
+    #[test]
+    fn pump_chunk_rejects_hostile_compression_ratio() {
+        let raw = vec![0; 1024 * 1024];
+        let compressed = compress_to_vec(&raw[..], CompressionLevel::Fastest);
+        assert!(decompress_chunk_with_limit(&compressed, raw.len()).is_err());
+    }
+
+    #[test]
+    fn pump_chunk_accepts_legitimate_payload_at_test_limit() {
+        let mut state = 0x1234_5678_u32;
+        let raw = (0..1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let compressed = compress_to_vec(&raw[..], CompressionLevel::Fastest);
+        assert_eq!(
+            decompress_chunk_with_limit(&compressed, raw.len()).unwrap(),
+            raw
+        );
     }
 }

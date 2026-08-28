@@ -5,8 +5,8 @@ use super::dag::{DAG, EdgeKey, Node, NodeKey};
 use super::generation_cache::Cache;
 use super::worker_logic::{RecvChunk, generation_work, io_read_work, io_write_work};
 use super::{
-    ChunkLevel, ChunkListener, ChunkLoading, ChunkPos, HashMapType, HashSetType, IOLock,
-    LevelChannel,
+    ChunkLevel, ChunkListener, ChunkLoading, ChunkPos, ChunkWriteRequest, HashMapType, HashSetType,
+    IOLock, LevelChannel, release_io_locks,
 };
 use crate::chunk::io::Dirtiable;
 use crate::level::{Level, SyncChunk};
@@ -23,6 +23,88 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, info, trace, warn};
+
+fn reject_write_request(
+    request: ChunkWriteRequest,
+    io_lock: &IOLock,
+    message: &str,
+) -> Vec<(ChunkPos, Chunk)> {
+    let positions = request
+        .chunks
+        .iter()
+        .map(|(position, _)| *position)
+        .collect::<Vec<_>>();
+    release_io_locks(io_lock, positions);
+    for completion in request.completions {
+        let _ = completion.send(Err(message.to_string()));
+    }
+    request.chunks
+}
+
+fn should_save_chunk(chunk: &Chunk, save_proto_chunk: bool) -> bool {
+    match chunk {
+        Chunk::Level(sync_chunk) => sync_chunk.is_dirty(),
+        Chunk::Proto(proto) => {
+            save_proto_chunk
+                && !matches!(
+                    proto.stage,
+                    crate::chunk_system::chunk_state::StagedChunkEnum::Empty
+                        | crate::chunk_system::chunk_state::StagedChunkEnum::None
+                )
+        }
+    }
+}
+
+#[cfg(test)]
+mod write_request_tests {
+    use super::{Chunk, ChunkWriteRequest, HashMapType, reject_write_request, should_save_chunk};
+    use crate::chunk::ChunkData;
+    use crate::chunk::io::Dirtiable;
+    use crate::chunk_system::IOLock;
+    use pumpkin_util::math::vector2::Vector2;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::{Notify, oneshot};
+
+    #[tokio::test]
+    async fn rejected_write_request_releases_lock_and_reports_failure() {
+        let position = Vector2::new(3, -2);
+        let io_lock: IOLock = Arc::new((Mutex::new(HashMapType::default()), Notify::new()));
+        io_lock
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(position, 1);
+        let (completion, result) = oneshot::channel();
+        let request = ChunkWriteRequest {
+            chunks: vec![(position, Chunk::Level(ChunkData::empty_sync(3, -2)))],
+            force_flush: true,
+            completions: vec![completion],
+            queue_guard: crate::serialization_metrics::enter_save_queue(),
+        };
+
+        let chunks = reject_write_request(request, &io_lock, "injected queue close");
+
+        assert_eq!(chunks.len(), 1);
+        assert!(
+            io_lock
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+        assert_eq!(
+            result.await.unwrap(),
+            Err("injected queue close".to_string())
+        );
+    }
+
+    #[test]
+    fn dirty_level_chunk_is_selected_for_retry() {
+        let chunk = ChunkData::empty_sync(3, -2);
+        chunk.mark_dirty(true);
+        assert!(should_save_chunk(&Chunk::Level(chunk), false));
+    }
+}
 
 pub(crate) struct TaskHeapNode(i8, NodeKey);
 impl PartialEq for TaskHeapNode {
@@ -71,7 +153,7 @@ pub struct GenerationSchedule {
     queue_dirty: bool,
     recv_chunk: crossfire::compat::MRx<(ChunkPos, RecvChunk)>,
     io_read: crossfire::compat::MTx<Vec<ChunkPos>>,
-    io_write: crossfire::compat::Tx<Vec<(ChunkPos, Chunk)>>,
+    io_write: crossfire::compat::Tx<ChunkWriteRequest>,
     generate: crossfire::compat::MTx<(ChunkPos, Cache, StagedChunkEnum)>,
     send_chunk: crossfire::compat::MTx<(ChunkPos, RecvChunk)>,
     gen_pool: Option<Arc<rayon::ThreadPool>>,
@@ -796,30 +878,34 @@ impl GenerationSchedule {
             *data.entry(*pos).or_insert(0) += 1;
         }
         drop(data);
-        if let Err(e) = self.io_write.send(chunks) {
+        if let Err(error) = self.io_write.send(ChunkWriteRequest {
+            chunks,
+            force_flush: false,
+            completions: Vec::new(),
+            queue_guard: crate::serialization_metrics::enter_save_queue(),
+        }) {
             error!(
                 "Failed to send chunks to io write thread during save (may have shut down): {:?}",
-                e
+                error
+            );
+            let _ = reject_write_request(
+                error.0,
+                &self.io_lock,
+                "chunk save queue closed before the unload request was admitted",
             );
         }
     }
 
-    fn save_all_chunk(&mut self, save_proto_chunk: bool) {
+    fn save_all_chunk(
+        &mut self,
+        save_proto_chunk: bool,
+        completions: Vec<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    ) {
         let mut chunks = Vec::with_capacity(self.chunk_map.len());
 
         for (pos, holder) in &mut self.chunk_map {
             if let Some(chunk) = &holder.chunk {
-                let should_save = match chunk {
-                    Chunk::Level(sync_chunk) => sync_chunk.is_dirty(),
-                    Chunk::Proto(proto) => {
-                        save_proto_chunk
-                            && !matches!(
-                                proto.stage,
-                                crate::chunk_system::chunk_state::StagedChunkEnum::Empty
-                                    | crate::chunk_system::chunk_state::StagedChunkEnum::None
-                            )
-                    }
-                };
+                let should_save = should_save_chunk(chunk, save_proto_chunk);
 
                 if should_save {
                     let chunk_to_save = match chunk {
@@ -832,6 +918,9 @@ impl GenerationSchedule {
         }
 
         if chunks.is_empty() {
+            for completion in completions {
+                let _ = completion.send(Ok(()));
+            }
             return;
         }
 
@@ -851,8 +940,25 @@ impl GenerationSchedule {
         }
         drop(data);
 
-        if let Err(e) = self.io_write.send(chunks) {
-            error!("Failed to send chunks to io write thread: {:?}", e);
+        if let Err(error) = self.io_write.send(ChunkWriteRequest {
+            chunks,
+            force_flush: true,
+            completions,
+            queue_guard: crate::serialization_metrics::enter_save_queue(),
+        }) {
+            error!("Failed to send chunks to io write thread: {:?}", error);
+            for (position, chunk) in reject_write_request(
+                error.0,
+                &self.io_lock,
+                "chunk save queue closed before the request was admitted",
+            ) {
+                if matches!(chunk, Chunk::Proto(_))
+                    && let Some(holder) = self.chunk_map.get_mut(&position)
+                    && holder.chunk.is_none()
+                {
+                    holder.chunk = Some(chunk);
+                }
+            }
         }
     }
 
@@ -1179,13 +1285,13 @@ impl GenerationSchedule {
                 self.process_unload_queue();
             }
             if level.should_save.swap(false, Relaxed) {
-                self.save_all_chunk(false);
+                self.save_all_chunk(false, level.take_save_waiters());
             }
             if level.shut_down_chunk_system.load(Relaxed) {
                 info!("Saving chunks before shutdown...");
                 self.garbage_collect_dependencies();
                 self.process_unload_queue();
-                self.save_all_chunk(true);
+                self.save_all_chunk(true, level.take_save_waiters());
                 break;
             }
 
@@ -1221,7 +1327,7 @@ impl GenerationSchedule {
                 if level.shut_down_chunk_system.load(Relaxed) {
                     self.queue.push(task);
                     info!("Shutdown detected during task processing, saving chunks...");
-                    self.save_all_chunk(true);
+                    self.save_all_chunk(true, Vec::new());
                     break 'out2;
                 }
 
@@ -1314,7 +1420,7 @@ impl GenerationSchedule {
                             && self.io_read.send(std::mem::take(&mut io_batch)).is_err()
                         {
                             info!("IO read thread closed, saving remaining chunks...");
-                            self.save_all_chunk(true);
+                            self.save_all_chunk(true, Vec::new());
                             break 'out2;
                         }
                     } else {
@@ -1323,7 +1429,7 @@ impl GenerationSchedule {
                             && self.io_read.send(std::mem::take(&mut io_batch)).is_err()
                         {
                             info!("IO read thread closed, saving remaining chunks...");
-                            self.save_all_chunk(true);
+                            self.save_all_chunk(true, Vec::new());
                             break 'out2;
                         }
 
@@ -1450,7 +1556,7 @@ impl GenerationSchedule {
                         } else if self.generate.send((node.pos, cache, node.stage)).is_err() {
                             self.running_task_count = self.running_task_count.saturating_sub(1);
                             info!("Generation thread closed, saving remaining chunks...");
-                            self.save_all_chunk(true);
+                            self.save_all_chunk(true, Vec::new());
                             break 'out2;
                         }
                     }
@@ -1460,7 +1566,7 @@ impl GenerationSchedule {
             // Flush any remaining IO batch
             if !io_batch.is_empty() && self.io_read.send(std::mem::take(&mut io_batch)).is_err() {
                 info!("IO read thread closed, saving remaining chunks...");
-                self.save_all_chunk(true);
+                self.save_all_chunk(true, Vec::new());
             }
 
             // 3. If queue is empty, wait for work or results

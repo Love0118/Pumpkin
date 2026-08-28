@@ -6,7 +6,7 @@ use pumpkin_util::math::vector3::Vector3;
 
 use crate::{
     entity::{
-        Entity, EntityBase, EntityBaseFuture,
+        DamageContext, Entity, EntityBase, EntityBaseFuture,
         living::LivingEntity,
         projectile::{ProjectileHit, ThrownItemEntity},
     },
@@ -95,17 +95,19 @@ impl EntityBase for LlamaSpitEntity {
                 let world = self.get_entity().world.load();
                 let owner_id = self.thrown.owner_id;
                 let owner = owner_id.and_then(|id| world.get_entity_by_id(id));
+                let projectile = world.get_entity_by_id(self.get_entity().entity_id);
 
                 tokio::spawn(async move {
+                    let mut context =
+                        DamageContext::new(1.0, DamageType::SPIT).with_position(hit_pos);
+                    if let Some(projectile) = projectile.as_deref() {
+                        context = context.with_direct_entity(projectile);
+                    }
+                    if let Some(owner) = owner.as_deref() {
+                        context = context.with_causing_entity(owner);
+                    }
                     let _ = entity_clone
-                        .damage_with_context(
-                            entity_clone.as_ref(),
-                            1.0,
-                            DamageType::SPIT,
-                            Some(hit_pos),
-                            None,
-                            owner.as_deref(),
-                        )
+                        .damage_with_context(entity_clone.as_ref(), context)
                         .await;
                 });
             }

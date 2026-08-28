@@ -107,8 +107,9 @@ impl JavaClient {
                                 player.trigger_advancement(crate::entity::player::advancement::trigger::AdvancementTrigger::CuredZombieVillager).await;
                             }
 
-                            let interacted = event.target.interact(player, &mut stack).await;
-                            if !interacted {
+                            let interaction_result =
+                                event.target.interact_result(player, &mut stack).await;
+                            if interaction_result.should_run_item_fallback() {
                                 server
                                     .item_registry
                                     .use_on_entity(&mut stack, player, event.target)

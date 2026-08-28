@@ -7,8 +7,24 @@ use tokio::sync::Mutex;
 
 pub struct BannerBlockEntity {
     pub position: BlockPos,
-    pub custom_name: Mutex<Option<String>>,
-    pub patterns: Mutex<Option<Vec<NbtTag>>>,
+    state: Mutex<BannerState>,
+}
+
+#[derive(Clone, Default)]
+struct BannerState {
+    custom_name: Option<String>,
+    patterns: Option<Vec<NbtTag>>,
+}
+
+impl BannerState {
+    fn write_nbt(self, nbt: &mut NbtCompound) {
+        if let Some(name) = self.custom_name {
+            nbt.put_string("CustomName", name);
+        }
+        if let Some(patterns) = self.patterns {
+            nbt.put_list("patterns", patterns);
+        }
+    }
 }
 
 impl BlockEntity for BannerBlockEntity {
@@ -28,8 +44,10 @@ impl BlockEntity for BannerBlockEntity {
         let patterns = nbt.get_list("patterns").map(<[_]>::to_vec);
         Self {
             position,
-            custom_name: Mutex::new(custom_name),
-            patterns: Mutex::new(patterns),
+            state: Mutex::new(BannerState {
+                custom_name,
+                patterns,
+            }),
         }
     }
 
@@ -38,27 +56,13 @@ impl BlockEntity for BannerBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(name) = self.custom_name.lock().await.as_ref() {
-                nbt.put_string("CustomName", name.clone());
-            }
-            if let Some(pats) = self.patterns.lock().await.as_ref() {
-                nbt.put_list("patterns", pats.clone());
-            }
+            self.state.lock().await.clone().write_nbt(nbt);
         })
     }
 
     fn chunk_data_nbt(&self) -> Option<NbtCompound> {
         let mut nbt = NbtCompound::new();
-        if let Ok(name) = self.custom_name.try_lock()
-            && let Some(ref name) = *name
-        {
-            nbt.put_string("CustomName", name.clone());
-        }
-        if let Ok(patterns) = self.patterns.try_lock()
-            && let Some(ref pats) = *patterns
-        {
-            nbt.put_list("patterns", pats.clone());
-        }
+        self.state.try_lock().ok()?.clone().write_nbt(&mut nbt);
         Some(nbt)
     }
 
@@ -73,8 +77,17 @@ impl BannerBlockEntity {
     pub const fn new(position: BlockPos) -> Self {
         Self {
             position,
-            custom_name: Mutex::const_new(None),
-            patterns: Mutex::const_new(None),
+            state: Mutex::const_new(BannerState {
+                custom_name: None,
+                patterns: None,
+            }),
         }
+    }
+
+    pub fn try_custom_name(&self) -> Option<String> {
+        self.state
+            .try_lock()
+            .ok()
+            .and_then(|state| state.custom_name.clone())
     }
 }

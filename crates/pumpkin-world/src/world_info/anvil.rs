@@ -14,9 +14,10 @@ use pumpkin_nbt::{
 use pumpkin_util::{Difficulty, world_seed::Seed};
 use serde::{Deserialize, Serialize};
 
+use crate::persistence::atomic_write;
 use crate::world_info::{
     DataPacks, MAXIMUM_SUPPORTED_LEVEL_VERSION, MAXIMUM_SUPPORTED_WORLD_DATA_VERSION,
-    MINIMUM_SUPPORTED_LEVEL_VERSION, MINIMUM_SUPPORTED_WORLD_DATA_VERSION, WorldVersion,
+    MINIMUM_SUPPORTED_LEVEL_VERSION, WorldVersion,
     data_files::{
         minecraft_data_dir, read_game_rules, read_wandering_trader, read_weather,
         read_world_clocks, read_world_gen_settings, write_custom_boss_events_stub,
@@ -47,9 +48,7 @@ fn check_data_version(data: &NbtCompound) -> Result<(), WorldInfoError> {
         ));
     };
 
-    if (MINIMUM_SUPPORTED_WORLD_DATA_VERSION..=MAXIMUM_SUPPORTED_WORLD_DATA_VERSION)
-        .contains(&data_version)
-    {
+    if super::is_supported_world_data_version(data_version) {
         Ok(())
     } else {
         Err(WorldInfoError::UnsupportedDataVersion(data_version))
@@ -427,7 +426,6 @@ impl WorldInfoWriter for AnvilLevelInfo {
 
         // ── Write level.dat ───────────────────────────────────────────────────
         let path = level_folder.join(LEVEL_DAT_FILE_NAME);
-        let path_new = level_folder.join("level.dat_new");
         let path_old = level_folder.join(LEVEL_DAT_BACKUP_FILE_NAME);
 
         let mut root = existing_level_dat_root(&path)?;
@@ -438,13 +436,17 @@ impl WorldInfoWriter for AnvilLevelInfo {
         level_data_to_nbt(&level_data, &mut data_comp);
         root.put_compound(LEVEL_DATA_TAG, data_comp);
 
-        write_gzip_compound_tag(root, File::create(&path_new)?)
-            .map_err(|e| WorldInfoError::SerializationError(e.to_string()))?;
-
         if path.exists() {
-            let _ = std::fs::copy(&path, &path_old);
+            atomic_write(&path_old, |backup| {
+                let mut source = File::open(&path)?;
+                std::io::copy(&mut source, backup)?;
+                Ok::<(), WorldInfoError>(())
+            })?;
         }
-        let _ = std::fs::rename(&path_new, &path);
+        atomic_write(&path, |file| {
+            write_gzip_compound_tag(root, file)
+                .map_err(|error| WorldInfoError::SerializationError(error.to_string()))
+        })?;
 
         let data_version = level_data.data_version;
 
@@ -896,7 +898,9 @@ mod test {
         let mut root = pumpkin_nbt::compound::NbtCompound::new();
         root.put_compound("Data", data_comp);
 
-        let bytes = pumpkin_nbt::Nbt::from(root).write();
+        let bytes = pumpkin_nbt::Nbt::from(root)
+            .write()
+            .expect("test level.dat NBT should serialize");
         assert!(!bytes.is_empty());
     }
 

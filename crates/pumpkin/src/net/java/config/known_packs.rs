@@ -1,5 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use tracing::error;
 
 impl JavaClient {
     pub async fn handle_known_packs(
@@ -29,13 +30,23 @@ impl JavaClient {
                     &pumpkin_data::dimension::Dimension::THE_END,
                     &pumpkin_data::dimension::Dimension::THE_NETHER,
                 ];
-                let dim_entries: Vec<pumpkin_data::registry::RegistryEntryData> = dims
-                    .iter()
-                    .map(|dim| pumpkin_data::registry::RegistryEntryData {
+                let mut dim_entries = Vec::with_capacity(dims.len());
+                for dim in dims {
+                    let data = match build_dimension_nbt(dim) {
+                        Ok(data) => data,
+                        Err(serialization_error) => {
+                            error!(
+                                "Failed to serialize dimension registry entry {}: {serialization_error}",
+                                dim.minecraft_name
+                            );
+                            return Some(PacketHandlerResult::Stop);
+                        }
+                    };
+                    dim_entries.push(pumpkin_data::registry::RegistryEntryData {
                         entry_id: dim.minecraft_name.to_string(),
-                        data: Some(build_dimension_nbt(dim).into_boxed_slice()),
-                    })
-                    .collect();
+                        data: Some(data.into_boxed_slice()),
+                    });
+                }
                 self.send_packet(&CRegistryData::new(
                     &"minecraft:dimension_type".to_string(),
                     &dim_entries,

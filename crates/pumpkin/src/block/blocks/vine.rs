@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use crate::{
     block::{
         BlockBehaviour, BlockFuture, BlockIsReplacing, CanPlaceAtArgs, CanUpdateAtArgs,
-        GetStateForNeighborUpdateArgs, OnPlaceArgs, UseWithItemArgs, registry::BlockActionResult,
+        GetStateForNeighborUpdateArgs, OnPlaceArgs, UseWithItemArgs,
+        blocks::multiface::can_attach_to, registry::BlockActionResult,
     },
     entity::{EntityBase, player::Player},
 };
@@ -68,10 +69,7 @@ impl BlockBehaviour for VineBlock {
             let old_directions = get_vine_block_directions(old_props);
             let mut new_directions = old_directions.clone();
             for old_dir in old_directions {
-                let support_block = args
-                    .world
-                    .get_block(&args.position.offset(old_dir.to_offset()));
-                if !supports_vine(support_block)
+                if !can_attach_to(args.world, args.position, old_dir)
                     && !is_top_block_full_vine(args.world, args.position)
                 {
                     new_directions.remove(&old_dir);
@@ -189,18 +187,12 @@ fn can_place_vine_at(
         return false;
     };
 
-    let support_pos = block_pos.offset(direction.to_offset());
-    let (support_block, _support_block_state) = block_accessor.get_block_and_state(&support_pos);
-    if !supports_vine(support_block) && !is_top_block_full_vine(block_accessor, block_pos) {
+    if !can_attach_to(block_accessor, block_pos, direction)
+        && !is_top_block_full_vine(block_accessor, block_pos)
+    {
         return false;
     }
     true
-}
-const fn supports_vine(support_block: &Block) -> bool {
-    if support_block.default_state.is_full_cube() {
-        return true;
-    }
-    false
 }
 //returns (accurate direction, boolean)
 // true if this direction is for hanging vine
@@ -217,7 +209,9 @@ fn get_accurate_direction(
         return (None, false);
     }
 
-    if click_direction != BlockDirection::Down && supports_vine(clicked_block) {
+    if click_direction != BlockDirection::Down
+        && can_attach_to(block_accessor, block_pos, click_direction)
+    {
         return (Some(click_direction), false);
     }
     let (replacing_block, replacing_block_state) = block_accessor.get_block_and_state(block_pos);
@@ -231,10 +225,9 @@ fn get_accurate_direction(
         let mut up = false;
         for dir in get_nearest_looking_directions(player, replacing, click_direction) {
             if dir != BlockDirection::Down && !already_active_directions.contains(&dir) {
-                let support_pos = block_pos.offset(dir.to_offset());
-                let (support_block, _support_block_state) =
-                    block_accessor.get_block_and_state(&support_pos);
-                if !supports_vine(support_block) {
+                // Vine keeps its own hanging rule, but shares vanilla's
+                // direction-aware support-face check with multiface blocks.
+                if !can_attach_to(block_accessor, block_pos, dir) {
                     //handler for hanging vine
                     if is_top_block_full_vine(block_accessor, block_pos) {
                         if dir == BlockDirection::Up {

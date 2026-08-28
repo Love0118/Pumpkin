@@ -85,7 +85,8 @@ impl Goal for BlazeShootFireballGoal {
         true
     }
 
-    fn tick<'a>(&'a mut self, _mob: &'a dyn Mob) -> GoalFuture<'a, ()> {
+    #[expect(clippy::too_many_lines)]
+    fn tick<'a>(&'a mut self, mob: &'a dyn Mob) -> GoalFuture<'a, ()> {
         Box::pin(async move {
             self.attack_time -= 1;
 
@@ -98,8 +99,11 @@ impl Goal for BlazeShootFireballGoal {
                 return;
             };
 
-            // TODO: hasLineOfSight check
-            let has_line_of_sight = true;
+            let has_line_of_sight = mob
+                .get_mob_entity()
+                .sensing
+                .has_line_of_sight(mob.get_entity(), target.get_entity())
+                .await;
 
             if has_line_of_sight {
                 self.last_seen = 0;

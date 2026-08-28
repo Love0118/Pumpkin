@@ -67,6 +67,138 @@ pub mod vault;
 pub use furnace_like_block_entity::ExperienceContainer;
 pub use pumpkin_world::block::entities::PropertyDelegate;
 
+/// Immutable, detached persistence payload for one block entity.
+pub struct BlockEntitySaveSnapshot {
+    resource_location: &'static str,
+    position: BlockPos,
+    data: NbtCompound,
+}
+
+impl BlockEntitySaveSnapshot {
+    #[must_use]
+    pub fn into_nbt(self, custom_data: Option<NbtCompound>) -> NbtCompound {
+        self.into_nbt_with_residual(custom_data, None)
+    }
+
+    /// Merges a bounded source root with this detached authoritative snapshot.
+    ///
+    /// Keys emitted by the snapshot and keys that a concrete implementation may
+    /// omit at its default value are removed first, so an old value cannot be
+    /// resurrected from the residual map. Canonical identity, position, and
+    /// custom data are always written last.
+    #[must_use]
+    pub fn into_nbt_with_residual(
+        self,
+        custom_data: Option<NbtCompound>,
+        residual: Option<NbtCompound>,
+    ) -> NbtCompound {
+        let Self {
+            resource_location,
+            position,
+            data,
+        } = self;
+        let mut nbt = residual.unwrap_or_default();
+        for key in ["id", "x", "y", "z", "PumpkinCustomData", "BukkitValues"]
+            .into_iter()
+            .chain(data.child_tags.keys().map(AsRef::as_ref))
+            .chain(
+                block_entity_default_omitted_nbt_keys(resource_location)
+                    .iter()
+                    .copied(),
+            )
+        {
+            nbt.child_tags.remove(key);
+        }
+        nbt.extend(data);
+        nbt.put_string("id", resource_location);
+        nbt.put_int("x", position.0.x);
+        nbt.put_int("y", position.0.y);
+        nbt.put_int("z", position.0.z);
+        if let Some(custom_data) = custom_data
+            && !custom_data.is_empty()
+        {
+            nbt.put_compound("PumpkinCustomData", custom_data);
+        }
+        nbt
+    }
+}
+
+/// Authoritative keys that supported block entities can omit while serializing
+/// their default or empty state. Unconditionally emitted keys are discovered
+/// from the detached snapshot itself.
+fn block_entity_default_omitted_nbt_keys(id: &str) -> &'static [&'static str] {
+    match id {
+        "minecraft:barrel"
+        | "minecraft:chest"
+        | "minecraft:trapped_chest"
+        | "minecraft:shulker_box"
+        | "minecraft:dispenser"
+        | "minecraft:dropper" => &["Items", "LootTable", "LootTableSeed", "CustomName", "Lock"],
+        "minecraft:hopper" => &[
+            "Items",
+            "LootTable",
+            "LootTableSeed",
+            "CustomName",
+            "Lock",
+            "TransferCooldown",
+        ],
+        "minecraft:furnace" | "minecraft:blast_furnace" | "minecraft:smoker" => &[
+            "Items",
+            "RecipesUsed",
+            "CustomName",
+            "Lock",
+            "cooking_total_time",
+            "cooking_time_spent",
+            "lit_total_time",
+            "lit_time_remaining",
+        ],
+        "minecraft:brewing_stand" => &["Items", "BrewTime", "Fuel", "CustomName", "Lock"],
+        "minecraft:beacon" => &[
+            "primary_effect",
+            "secondary_effect",
+            "Levels",
+            "CustomName",
+            "Lock",
+        ],
+        "minecraft:jukebox" => &["RecordItem", "ticks_since_song_started"],
+        "minecraft:mob_spawner" => &[
+            "Delay",
+            "MinSpawnDelay",
+            "MaxSpawnDelay",
+            "SpawnCount",
+            "SpawnRange",
+            "SpawnData",
+        ],
+        "minecraft:chiseled_bookshelf" => &["Items", "last_interacted_slot"],
+        "minecraft:lectern" => &["Book", "Page"],
+        "minecraft:crafter" => &["Items", "crafting_ticks_remaining", "triggered"],
+        "minecraft:shelf" => &["Items"],
+        "minecraft:command_block" => &[
+            "auto",
+            "Command",
+            "conditionMet",
+            "LastOutput",
+            "powered",
+            "SuccessCount",
+            "TrackOutput",
+            "UpdateLastExecution",
+            "LastExecution",
+        ],
+        "minecraft:banner" => &["CustomName", "patterns"],
+        "minecraft:beehive" => &["Bees", "FlowerPos"],
+        "minecraft:brushable_block" => &["item", "hits", "direction"],
+        "minecraft:conduit" => &["Active", "Target"],
+        "minecraft:creaking_heart" => &["creaking_uuid"],
+        "minecraft:decorated_pot" => &["sherds", "item"],
+        "minecraft:enchanting_table" => &["CustomName"],
+        "minecraft:end_gateway" => &["Age", "ExactTeleport", "ExitPortal"],
+        "minecraft:skull" => &["note_block_sound", "profile"],
+        "minecraft:trial_spawner" => &["normal_config", "ominous_config", "spawner_data"],
+        "minecraft:vault" => &["config", "server_data"],
+        _ => &[],
+    }
+}
+
 //TODO: We need a mark_dirty for chests
 pub trait BlockEntity: Any + Send + Sync {
     fn write_nbt<'a>(
@@ -102,12 +234,21 @@ pub trait BlockEntity: Any + Send + Sync {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            nbt.put_string("id", self.resource_location().to_string());
-            let position = self.get_position();
-            nbt.put_int("x", position.0.x);
-            nbt.put_int("y", position.0.y);
-            nbt.put_int("z", position.0.z);
-            self.write_nbt(nbt).await;
+            *nbt = self.capture_save_snapshot().await.into_nbt(None);
+        })
+    }
+
+    fn capture_save_snapshot<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = BlockEntitySaveSnapshot> + Send + 'a>> {
+        Box::pin(async move {
+            let mut data = NbtCompound::new();
+            self.write_nbt(&mut data).await;
+            BlockEntitySaveSnapshot {
+                resource_location: self.resource_location(),
+                position: self.get_position(),
+                data,
+            }
         })
     }
     fn get_id(&self) -> u32 {
@@ -448,12 +589,18 @@ pub fn create_block_entity(
 
 #[cfg(test)]
 mod test {
-    use super::{BlockEntity, block_entity_from_nbt, furnace::FurnaceBlockEntity};
+    use super::{
+        BlockEntity, block_entity_from_nbt, campfire::CampfireBlockEntity,
+        furnace::FurnaceBlockEntity, jigsaw_block::JigsawBlockEntity, jukebox::JukeboxBlockEntity,
+        structure_block::StructureBlockBlockEntity,
+    };
     use pumpkin_data::{item::Item, item_stack::ItemStack};
     use pumpkin_nbt::compound::NbtCompound;
     use pumpkin_util::math::position::BlockPos;
+    use pumpkin_world::generation::structure::structures::jigsaw::JigsawJointType;
     use pumpkin_world::inventory::Inventory;
     use std::sync::Arc;
+    use std::time::Duration;
 
     /// A loaded block entity is serialized back into its chunk with
     /// `write_internal`, so whatever it holds has to survive that round trip or
@@ -480,5 +627,160 @@ mod test {
             assert_eq!(stack.get_item().id, Item::DIAMOND.id);
             assert_eq!(stack.item_count, 5);
         }
+    }
+
+    #[tokio::test]
+    async fn detached_snapshot_adds_identity_position_and_custom_data() {
+        let position = BlockPos::new(4, 70, -8);
+        let block_entity = StructureBlockBlockEntity::new(position);
+        let mut custom_data = NbtCompound::new();
+        custom_data.put_int("value", 9);
+
+        let nbt = block_entity
+            .capture_save_snapshot()
+            .await
+            .into_nbt(Some(custom_data));
+
+        assert_eq!(nbt.get_string("id"), Some("minecraft:structure_block"));
+        assert_eq!(nbt.get_int("x"), Some(4));
+        assert_eq!(nbt.get_int("y"), Some(70));
+        assert_eq!(nbt.get_int("z"), Some(-8));
+        assert_eq!(
+            nbt.get_compound("PumpkinCustomData")
+                .and_then(|data| data.get_int("value")),
+            Some(9)
+        );
+    }
+
+    #[tokio::test]
+    async fn campfire_snapshot_has_one_consistent_state_payload() {
+        let block_entity = CampfireBlockEntity::new(BlockPos::new(1, 64, 1));
+
+        let nbt = block_entity.capture_save_snapshot().await.into_nbt(None);
+
+        assert!(nbt.get_list("Items").is_some_and(<[_]>::is_empty));
+        assert_eq!(
+            nbt.get_int_array("CookingTimes"),
+            Some([0, 0, 0, 0].as_slice())
+        );
+        assert_eq!(
+            nbt.get_int_array("CookingTotalTimes"),
+            Some([0, 0, 0, 0].as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn block_entity_residual_survives_restart_without_resurrecting_known_defaults() {
+        let position = BlockPos::new(3, 70, -5);
+        let mut source = NbtCompound::new();
+        source.put_string("id", JukeboxBlockEntity::ID);
+        source.put_int("x", position.0.x);
+        source.put_int("y", position.0.y);
+        source.put_int("z", position.0.z);
+        source.put_compound("RecordItem", NbtCompound::new());
+        source.put_string("plugin:marker", "kept");
+
+        let residual = pumpkin_world::persistence::bounded_residual_nbt(
+            &source,
+            ["id", "x", "y", "z", "PumpkinCustomData", "BukkitValues"],
+            256,
+            256 * 1024,
+        )
+        .unwrap();
+        let loaded = block_entity_from_nbt(&source).unwrap();
+        let rewritten = loaded
+            .capture_save_snapshot()
+            .await
+            .into_nbt_with_residual(None, Some(residual));
+
+        assert_eq!(rewritten.get_string("plugin:marker"), Some("kept"));
+        assert!(rewritten.get("RecordItem").is_none());
+        assert_eq!(rewritten.get_string("id"), Some(JukeboxBlockEntity::ID));
+        assert_eq!(rewritten.get_int("x"), Some(position.0.x));
+        assert!(block_entity_from_nbt(&rewritten).is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn jigsaw_snapshot_stays_atomic_during_concurrent_reconfiguration() {
+        let block_entity = Arc::new(JigsawBlockEntity::new(BlockPos::new(2, 64, 2)));
+        block_entity
+            .update_configuration(
+                "generation-0".to_string(),
+                "generation-0".to_string(),
+                "generation-0".to_string(),
+                "generation-0".to_string(),
+                JigsawJointType::Rollable,
+                0,
+                0,
+            )
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let writer = {
+                let block_entity = block_entity.clone();
+                tokio::spawn(async move {
+                    for generation in 1..=1_000 {
+                        let value = format!("generation-{generation}");
+                        block_entity
+                            .update_configuration(
+                                value.clone(),
+                                value.clone(),
+                                value.clone(),
+                                value,
+                                if generation % 2 == 0 {
+                                    JigsawJointType::Rollable
+                                } else {
+                                    JigsawJointType::Aligned
+                                },
+                                generation,
+                                generation,
+                            )
+                            .await;
+                        tokio::task::yield_now().await;
+                    }
+                })
+            };
+
+            for _ in 0..1_000 {
+                let nbt = block_entity.capture_save_snapshot().await.into_nbt(None);
+                let generation = nbt
+                    .get_int(JigsawBlockEntity::SELECTION_PRIORITY)
+                    .expect("jigsaw snapshot must contain selection priority");
+                let expected = format!("generation-{generation}");
+                assert_eq!(
+                    nbt.get_string(JigsawBlockEntity::NAME),
+                    Some(expected.as_str())
+                );
+                assert_eq!(
+                    nbt.get_string(JigsawBlockEntity::TARGET),
+                    Some(expected.as_str())
+                );
+                assert_eq!(
+                    nbt.get_string(JigsawBlockEntity::POOL),
+                    Some(expected.as_str())
+                );
+                assert_eq!(
+                    nbt.get_string(JigsawBlockEntity::FINAL_STATE),
+                    Some(expected.as_str())
+                );
+                assert_eq!(
+                    nbt.get_int(JigsawBlockEntity::PLACEMENT_PRIORITY),
+                    Some(generation)
+                );
+                assert_eq!(
+                    nbt.get_string(JigsawBlockEntity::JOINT),
+                    Some(if generation % 2 == 0 {
+                        "rollable"
+                    } else {
+                        "aligned"
+                    })
+                );
+                tokio::task::yield_now().await;
+            }
+
+            writer.await.expect("jigsaw writer task must finish");
+        })
+        .await
+        .expect("jigsaw snapshot regression must finish without deadlock");
     }
 }

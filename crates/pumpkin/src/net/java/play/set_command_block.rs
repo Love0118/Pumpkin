@@ -60,20 +60,29 @@ impl JavaClient {
                 cmd = &cmd[1..];
             }
 
-            let command_block = CommandBlockEntity {
-                position: pos,
-                powered: old_command_block.powered.load(Ordering::SeqCst).into(),
-                condition_met: old_command_block
-                    .condition_met
-                    .load(Ordering::SeqCst)
-                    .into(),
-                auto: command.is_automatic().into(),
-                dirty: old_command_block.dirty.load(Ordering::SeqCst).into(),
-                command: Mutex::new(cmd.to_string()),
-                last_output: old_command_block.last_output.lock().await.clone().into(),
-                track_output: command.track_output().into(),
-                success_count: AtomicU32::new(0),
-            };
+            let command_block = CommandBlockEntity::new(
+                pos,
+                command.track_output(),
+                block_type == Block::CHAIN_COMMAND_BLOCK,
+            );
+            command_block.powered.store(
+                old_command_block.powered.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+            command_block.condition_met.store(
+                old_command_block.condition_met.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+            command_block
+                .auto
+                .store(command.is_automatic(), Ordering::SeqCst);
+            command_block.dirty.store(
+                old_command_block.dirty.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+            command_block
+                .set_command_and_last_output(cmd.to_string(), old_command_block.last_output().await)
+                .await;
             player.world().add_block_entity(Arc::new(command_block));
 
             player

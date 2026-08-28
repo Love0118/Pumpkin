@@ -26,9 +26,14 @@ pub struct BeaconBlockEntity {
     pub payment: Arc<Mutex<ItemStack>>,
 
     // Vanilla Parity Fields
-    pub custom_name: Mutex<Option<String>>,
-    pub lock_key: Mutex<Option<String>>,
+    metadata: Mutex<BeaconMetadata>,
     pub last_check_y: AtomicI32,
+}
+
+#[derive(Clone, Default)]
+struct BeaconMetadata {
+    custom_name: Option<String>,
+    lock_key: Option<String>,
 }
 
 impl BeaconBlockEntity {
@@ -49,8 +54,7 @@ impl BeaconBlockEntity {
             levels: AtomicI32::new(0),
             dirty: AtomicBool::new(false),
             payment: Arc::new(Mutex::new(ItemStack::EMPTY.clone())),
-            custom_name: Mutex::new(None),
-            lock_key: Mutex::new(None),
+            metadata: Mutex::new(BeaconMetadata::default()),
             last_check_y: AtomicI32::new(position.0.y - 1),
         }
     }
@@ -256,8 +260,10 @@ impl BlockEntity for BeaconBlockEntity {
             levels: AtomicI32::new(levels),
             dirty: AtomicBool::new(false),
             payment: Arc::new(Mutex::new(ItemStack::EMPTY.clone())),
-            custom_name: Mutex::new(custom_name),
-            lock_key: Mutex::new(lock_key),
+            metadata: Mutex::new(BeaconMetadata {
+                custom_name,
+                lock_key,
+            }),
             last_check_y: AtomicI32::new(position.0.y - 1),
         }
     }
@@ -267,6 +273,7 @@ impl BlockEntity for BeaconBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            let metadata = self.metadata.lock().await.clone();
             nbt.put_int(
                 "primary_effect",
                 self.primary_effect.load(Ordering::Relaxed),
@@ -277,11 +284,11 @@ impl BlockEntity for BeaconBlockEntity {
             );
             nbt.put_int("Levels", self.levels.load(Ordering::Relaxed));
 
-            if let Some(name) = &*self.custom_name.lock().await {
-                nbt.put_string("CustomName", name.clone());
+            if let Some(name) = metadata.custom_name {
+                nbt.put_string("CustomName", name);
             }
-            if let Some(lock) = &*self.lock_key.lock().await {
-                nbt.put_string("Lock", lock.clone());
+            if let Some(lock_key) = metadata.lock_key {
+                nbt.put_string("Lock", lock_key);
             }
         })
     }
@@ -314,15 +321,13 @@ impl BlockEntity for BeaconBlockEntity {
             self.secondary_effect.load(Ordering::Relaxed),
         );
         nbt.put_int("Levels", self.levels.load(Ordering::Relaxed));
-        if let Ok(name) = self.custom_name.try_lock()
-            && let Some(ref name) = *name
-        {
-            nbt.put_string("CustomName", name.clone());
-        }
-        if let Ok(lock) = self.lock_key.try_lock()
-            && let Some(ref lock) = *lock
-        {
-            nbt.put_string("Lock", lock.clone());
+        if let Ok(metadata) = self.metadata.try_lock() {
+            if let Some(ref name) = metadata.custom_name {
+                nbt.put_string("CustomName", name.clone());
+            }
+            if let Some(ref lock) = metadata.lock_key {
+                nbt.put_string("Lock", lock.clone());
+            }
         }
         Some(nbt)
     }
@@ -353,6 +358,10 @@ impl Inventory for BeaconBlockEntity {
                 ItemStack::EMPTY.clone()
             }
         })
+    }
+
+    fn snapshot_stacks(&self) -> InventoryFuture<'_, Vec<ItemStack>> {
+        Box::pin(async move { vec![self.payment.lock().await.clone()] })
     }
 
     fn remove_stack(&self, slot: usize) -> InventoryFuture<'_, ItemStack> {

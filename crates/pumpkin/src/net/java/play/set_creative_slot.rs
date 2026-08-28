@@ -22,7 +22,8 @@ impl JavaClient {
                 item_stack.item.registry_key.to_string(),
                 item_stack.item_count,
             );
-        if let Some(server) = player.world().server.upgrade() {
+        let server = player.world().server.upgrade();
+        if let Some(server) = server {
             server
                 .plugin_manager
                 .fire(&server, &mut creative_event)

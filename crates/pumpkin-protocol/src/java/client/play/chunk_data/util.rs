@@ -10,11 +10,13 @@ pub fn write_compound_nbt(
     version: JavaMinecraftVersion,
 ) -> Result<(), WritingError> {
     if version >= JavaMinecraftVersion::V_1_20_2 {
-        let bytes = pumpkin_nbt::Nbt::from(comp).write_unnamed();
-        write.write_all(&bytes)?;
+        pumpkin_nbt::Nbt::from(comp)
+            .write_unnamed_to_writer(&mut write)
+            .map_err(|error| WritingError::Message(error.to_string()))?;
     } else {
-        let bytes = pumpkin_nbt::Nbt::from(comp).write();
-        write.write_all(&bytes)?;
+        pumpkin_nbt::Nbt::from(comp)
+            .write_to_writer(&mut write)
+            .map_err(|error| WritingError::Message(error.to_string()))?;
     }
     Ok(())
 }

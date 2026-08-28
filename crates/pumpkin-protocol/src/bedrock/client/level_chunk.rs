@@ -15,8 +15,8 @@ use crate::{
 
 const VERSION: u8 = 9;
 
-fn write_block_storage(
-    writer: &mut Vec<u8>,
+fn write_block_storage<W: Write>(
+    writer: &mut W,
     network_repr: BeNetworkSerialization<u16>,
 ) -> Result<(), Error> {
     (network_repr.bits_per_entry << 1 | 1).write(writer)?;
@@ -56,7 +56,7 @@ pub type EncodedChunk = (Vec<u8>, Vec<ChunkBlob>);
 fn encode_block_actors(block_actors: &[NbtCompound]) -> Result<Vec<u8>, Error> {
     let mut encoded = Vec::new();
     for block_actor in block_actors {
-        encoded.write_all(&Nbt::from(block_actor.clone()).write_bedrock())?;
+        Nbt::write_compound_to_writer_bedrock(block_actor, &mut encoded).map_err(Error::other)?;
     }
     Ok(encoded)
 }
@@ -160,22 +160,30 @@ impl CLevelChunk<'_> {
                 )
             })?)
             .write(&mut writer)?;
-            writer.write_all(&[0])?;
-            writer.write_all(&block_actor_bytes)?;
         } else {
             VarUInt(0).write(&mut writer)?;
 
-            let mut chunk_data = Vec::new();
+            let chunk_data_len = subchunk_bytes_list
+                .iter()
+                .try_fold(0usize, |total, subchunk| total.checked_add(subchunk.len()))
+                .and_then(|total| total.checked_add(biome_buf.len()))
+                .and_then(|total| total.checked_add(1))
+                .and_then(|total| total.checked_add(block_actor_bytes.len()))
+                .ok_or_else(|| Error::other("Bedrock chunk payload length overflow"))?;
+            let chunk_data_len = u32::try_from(chunk_data_len).map_err(|_| {
+                Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Bedrock chunk payload exceeds the packet size limit",
+                )
+            })?;
+            VarUInt(chunk_data_len).write(&mut writer)?;
             for subchunk_buf in subchunk_bytes_list {
-                chunk_data.write_all(&subchunk_buf)?;
+                writer.write_all(&subchunk_buf)?;
             }
-            chunk_data.write_all(&biome_buf)?;
-            chunk_data.write_all(&[0])?;
-            chunk_data.write_all(&block_actor_bytes)?;
-
-            VarUInt(chunk_data.len() as u32).write(&mut writer)?;
-            writer.write_all(&chunk_data)?;
+            writer.write_all(&biome_buf)?;
         }
+        writer.write_all(&[0])?;
+        writer.write_all(&block_actor_bytes)?;
 
         Ok((writer, blobs))
     }

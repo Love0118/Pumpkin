@@ -2,12 +2,13 @@
 
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::deserializer::NbtReadHelper;
 use crate::serializer::NbtWriteHelper;
 use crate::tag::NbtTag;
-use crate::{END_ID, Error, Nbt};
+use crate::{COMPOUND_ID, END_ID, Error, LIST_ID, Nbt};
 use std::collections::hash_map::IntoIter;
 use std::io::ErrorKind;
 
@@ -119,14 +120,49 @@ impl NbtCompound {
         Ok(compound)
     }
 
-    /// Serializes the compound's entries followed by an end tag.
-    pub fn serialize_content<W: NbtWriteHelper>(self, w: &mut W) -> Result<(), Error> {
-        for (name, tag) in self.child_tags {
+    /// Serializes the compound's entries without writing the terminating end tag.
+    ///
+    /// This is useful for callers that need to append a borrowed entry without
+    /// cloning it into this compound first.
+    pub fn serialize_entries<W: NbtWriteHelper>(&self, w: &mut W) -> Result<(), Error> {
+        let mut entries = self.child_tags.iter().collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|(name, _)| *name);
+        for (name, tag) in entries {
             w.write_u8(tag.get_type_id())?;
-            w.write_string(&name)?;
+            w.write_string(name)?;
             tag.serialize_data(w)?;
         }
+        Ok(())
+    }
+
+    /// Serializes the compound's entries followed by an end tag.
+    pub fn serialize_content<W: NbtWriteHelper>(&self, w: &mut W) -> Result<(), Error> {
+        self.serialize_entries(w)?;
         w.write_u8(END_ID)?;
+        Ok(())
+    }
+
+    /// Serializes one named list of compound tags by reference.
+    ///
+    /// Unlike constructing [`NbtTag::List`], this does not clone the compound
+    /// payloads into an intermediate owned tag list.
+    pub fn serialize_compound_list_entry<W: NbtWriteHelper>(
+        name: &str,
+        compounds: &[Self],
+        w: &mut W,
+    ) -> Result<(), Error> {
+        let len = compounds.len();
+        if len > i32::MAX as usize {
+            return Err(Error::LargeLength(len));
+        }
+
+        w.write_u8(LIST_ID)?;
+        w.write_string(name)?;
+        w.write_u8(COMPOUND_ID)?;
+        w.write_i32(len as i32)?;
+        for compound in compounds {
+            compound.serialize_content(w)?;
+        }
         Ok(())
     }
 
@@ -142,7 +178,7 @@ impl NbtCompound {
     }
 
     /// Inserts a string tag when `name` is not already present.
-    pub fn put_string(&mut self, name: &str, value: String) {
+    pub fn put_string(&mut self, name: &str, value: impl Into<Arc<str>>) {
         self.put(name, NbtTag::String(value.into()));
     }
 

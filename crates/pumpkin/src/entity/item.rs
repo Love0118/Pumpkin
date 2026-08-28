@@ -1,5 +1,8 @@
 use crate::entity::player::statistics::StatisticCategory;
-use crate::{entity::EntityBaseFuture, server::Server};
+use crate::{
+    entity::{DamageContext, EntityBaseFuture},
+    server::Server,
+};
 use core::f32;
 use pumpkin_data::damage::DamageType;
 use pumpkin_data::data_component_impl::DamageResistantImpl;
@@ -189,7 +192,8 @@ impl ItemEntity {
             target_id: source.entity.entity_id,
             cancelled: false,
         };
-        if let Some(server) = self.entity.world.load().server.upgrade() {
+        let server = self.entity.world.load().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut event).await;
         }
         if event.cancelled {
@@ -362,7 +366,8 @@ impl ItemEntity {
                 crate::plugin::api::events::entity::item_despawn::ItemDespawnEvent::new(
                     entity.entity_id,
                 );
-            if let Some(server) = entity.world.load().server.upgrade() {
+            let server = entity.world.load().server.upgrade();
+            if let Some(server) = server {
                 server
                     .plugin_manager
                     .fire(&server, &mut despawn_event)
@@ -472,14 +477,12 @@ impl EntityBase for ItemEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        amount: f32,
-        damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        _source: Option<&'a dyn EntityBase>,
-        _cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
+            let amount = context.amount();
+            let damage_type = context.damage_type();
             // Check if entity is fire_immune
             let is_fire_damage = damage_type == DamageType::IN_FIRE
                 || damage_type == DamageType::ON_FIRE
@@ -584,7 +587,7 @@ impl EntityBase for ItemEntity {
         0.04
     }
 
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
+    fn write_custom_nbt_async<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
             let item = self.item_stack.lock().await;
             let mut item_compound = NbtCompound::new();

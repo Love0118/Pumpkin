@@ -17,6 +17,43 @@ pub type IOLock = std::sync::Arc<(
     tokio::sync::Notify,
 )>;
 
+pub(crate) fn release_io_locks(lock: &IOLock, positions: impl IntoIterator<Item = ChunkPos>) {
+    let mut locks = lock
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut released = false;
+    for position in positions {
+        match locks.entry(position) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let references = entry.get_mut();
+                if *references == 1 {
+                    entry.remove();
+                    released = true;
+                } else {
+                    *references -= 1;
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(_) => {
+                tracing::warn!(
+                    "attempted to release missing chunk I/O lock entry for {position:?}"
+                );
+            }
+        }
+    }
+    drop(locks);
+    if released {
+        lock.1.notify_waiters();
+    }
+}
+
+pub struct ChunkWriteRequest {
+    pub chunks: Vec<(ChunkPos, Chunk)>,
+    pub force_flush: bool,
+    pub completions: Vec<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    pub(crate) queue_guard: crate::serialization_metrics::SaveQueueGuard,
+}
+
 pub mod channel;
 pub mod chunk_holder;
 pub mod chunk_listener;

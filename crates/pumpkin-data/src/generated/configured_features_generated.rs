@@ -2292,7 +2292,27 @@ fn build_configured_features()
     map.insert(
         pumpkin_data::configured_feature::ConfiguredFeature::GlowLichen,
         ConfiguredFeature::MultifaceGrowth(
-            crate::generation::feature::features::multiface_growth::MultifaceGrowthFeature {},
+            crate::generation::feature::features::multiface_growth::MultifaceGrowthFeature {
+                block: &pumpkin_data::Block::GLOW_LICHEN,
+                can_be_placed_on: (&[
+                    pumpkin_data::BlockId::STONE.as_u16(),
+                    pumpkin_data::BlockId::ANDESITE.as_u16(),
+                    pumpkin_data::BlockId::DIORITE.as_u16(),
+                    pumpkin_data::BlockId::GRANITE.as_u16(),
+                    pumpkin_data::BlockId::DRIPSTONE_BLOCK.as_u16(),
+                    pumpkin_data::BlockId::CALCITE.as_u16(),
+                    pumpkin_data::BlockId::TUFF.as_u16(),
+                    pumpkin_data::BlockId::DEEPSLATE.as_u16(),
+                    pumpkin_data::BlockId::SULFUR.as_u16(),
+                    pumpkin_data::BlockId::CINNABAR.as_u16(),
+                ])
+                    .to_vec(),
+                can_place_on_floor: false,
+                can_place_on_ceiling: true,
+                can_place_on_wall: true,
+                chance_of_spreading: 0.5f32,
+                search_range: 20i32,
+            },
         ),
     );
     map.insert(
@@ -3873,7 +3893,25 @@ fn build_configured_features()
     map.insert(
         pumpkin_data::configured_feature::ConfiguredFeature::SculkVein,
         ConfiguredFeature::MultifaceGrowth(
-            crate::generation::feature::features::multiface_growth::MultifaceGrowthFeature {},
+            crate::generation::feature::features::multiface_growth::MultifaceGrowthFeature {
+                block: &pumpkin_data::Block::SCULK_VEIN,
+                can_be_placed_on: (&[
+                    pumpkin_data::BlockId::STONE.as_u16(),
+                    pumpkin_data::BlockId::ANDESITE.as_u16(),
+                    pumpkin_data::BlockId::DIORITE.as_u16(),
+                    pumpkin_data::BlockId::GRANITE.as_u16(),
+                    pumpkin_data::BlockId::DRIPSTONE_BLOCK.as_u16(),
+                    pumpkin_data::BlockId::CALCITE.as_u16(),
+                    pumpkin_data::BlockId::TUFF.as_u16(),
+                    pumpkin_data::BlockId::DEEPSLATE.as_u16(),
+                ])
+                    .to_vec(),
+                can_place_on_floor: true,
+                can_place_on_ceiling: true,
+                can_place_on_wall: true,
+                chance_of_spreading: 1f32,
+                search_range: 20i32,
+            },
         ),
     );
     map.insert(

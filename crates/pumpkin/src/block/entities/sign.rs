@@ -63,7 +63,7 @@ impl From<Text> for NbtTag {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
-                .map(|s| Self::String(s.clone()))
+                .map(|s| Self::String(s.clone().into()))
                 .collect(),
         );
         Self::Compound(nbt)

@@ -78,10 +78,15 @@ impl Goal for CreeperIgniteGoal {
 
             if dist_sq > 49.0 {
                 self.creeper.set_fuse_speed(-1);
-            }
-            // TODO: line of sight check (needs world raycast)
-            else {
+            } else if mob
+                .get_mob_entity()
+                .sensing
+                .has_line_of_sight(mob.get_entity(), target.get_entity())
+                .await
+            {
                 self.creeper.set_fuse_speed(1);
+            } else {
+                self.creeper.set_fuse_speed(-1);
             }
         })
     }

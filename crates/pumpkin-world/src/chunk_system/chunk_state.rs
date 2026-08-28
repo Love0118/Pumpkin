@@ -277,9 +277,10 @@ impl Chunk {
                 light_populated: AtomicBool::new(false),
                 status: ChunkStatus::Empty,
                 blending_data: None,
-                dirty: AtomicBool::new(false),
+                dirty: crate::chunk::DirtyState::new(false),
                 inhabited_time: AtomicU64::new(0),
                 custom_data: Mutex::new(NbtCompound::new()),
+                residual_nbt: Mutex::new(NbtCompound::new()),
             })),
         ) {
             Self::Proto(proto) => proto,
@@ -319,7 +320,7 @@ impl Chunk {
             heightmap: Mutex::new(heightmaps),
             x: proto_chunk.x,
             z: proto_chunk.z,
-            dirty: AtomicBool::new(true),
+            dirty: crate::chunk::DirtyState::new(true),
             block_ticks: ChunkTickScheduler::default(),
             fluid_ticks: ChunkTickScheduler::from_iter(proto_chunk.fluid_ticks),
             pending_block_entities: Mutex::new(pending_block_entities),
@@ -327,6 +328,7 @@ impl Chunk {
             blending_data: proto_chunk.blending_data,
             inhabited_time: AtomicU64::new(0),
             custom_data: Mutex::new(NbtCompound::new()),
+            residual_nbt: Mutex::new(NbtCompound::new()),
         };
 
         *self = Self::Level(Arc::new(chunk));

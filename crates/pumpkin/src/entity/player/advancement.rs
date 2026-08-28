@@ -434,7 +434,8 @@ impl PlayerAdvancement {
                 let player_c = player.clone();
                 let adv_id = advancement.id.to_string();
                 tokio::spawn(async move {
-                    if let Some(server) = player_c.world().server.upgrade() {
+                    let server = player_c.world().server.upgrade();
+                    if let Some(server) = server {
                         let mut event =
                             crate::plugin::api::events::player::player_advancement_done::PlayerAdvancementDoneEvent::new(
                                 player_c,

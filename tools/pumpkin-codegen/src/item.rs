@@ -1433,8 +1433,17 @@ pub fn build() -> TokenStream {
         );
         let component_based = item.component_based;
 
-        let components_bytes_lit =
-            LitByteStr::new(&item.components.write_bedrock(), Span::call_site());
+        let components_bytes = match item.components.write_bedrock() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let message = format!(
+                    "failed to serialize Bedrock item components for {}: {error}",
+                    registry_key
+                );
+                return quote! { compile_error!(#message); };
+            }
+        };
+        let components_bytes_lit = LitByteStr::new(&components_bytes, Span::call_site());
 
         bedrock_constants.extend(quote! {
             pub const #const_ident: Self = Self {

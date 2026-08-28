@@ -41,7 +41,8 @@ impl VehicleEntity {
             crate::plugin::api::events::vehicle::vehicle_update::VehicleUpdateEvent::new(
                 self.entity.entity_id,
             );
-        if let Some(server) = self.entity.world.load().server.upgrade() {
+        let server = self.entity.world.load().server.upgrade();
+        if let Some(server) = server {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     server.plugin_manager.fire(&server, &mut update_event).await;
@@ -55,7 +56,8 @@ impl VehicleEntity {
             crate::plugin::api::events::vehicle::vehicle_create::VehicleCreateEvent::new(
                 self.entity.entity_id,
             );
-        if let Some(server) = self.entity.world.load().server.upgrade() {
+        let server = self.entity.world.load().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut create_event).await;
         }
     }
@@ -71,7 +73,8 @@ impl VehicleEntity {
                 from,
                 to,
             );
-        if let Some(server) = self.entity.world.load().server.upgrade() {
+        let server = self.entity.world.load().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut move_event).await;
         }
     }
@@ -85,7 +88,8 @@ impl VehicleEntity {
             self.entity.entity_id,
             collided_entity_id,
         );
-        if let Some(server) = self.entity.world.load().server.upgrade() {
+        let server = self.entity.world.load().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut base_event).await;
             server
                 .plugin_manager
@@ -103,7 +107,8 @@ impl VehicleEntity {
             self.entity.entity_id,
             block_pos,
         );
-        if let Some(server) = self.entity.world.load().server.upgrade() {
+        let server = self.entity.world.load().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut base_event).await;
             server
                 .plugin_manager
@@ -193,7 +198,8 @@ impl VehicleEntity {
                 amount,
                 attacker_id,
             );
-        if let Some(server) = self.entity.world.load().server.upgrade() {
+        let server = self.entity.world.load().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut damage_event).await;
         }
         if damage_event.cancelled {
@@ -212,7 +218,8 @@ impl VehicleEntity {
                     self.entity.entity_id,
                     attacker_id,
                 );
-            if let Some(server) = self.entity.world.load().server.upgrade() {
+            let server = self.entity.world.load().server.upgrade();
+            if let Some(server) = server {
                 server
                     .plugin_manager
                     .fire(&server, &mut destroy_event)

@@ -180,10 +180,18 @@ pub(crate) fn build() -> TokenStream {
                         }
 
                         let nbt_tag = json_to_nbt_tag(entry_data);
-                        let bytes = if let pumpkin_nbt::tag::NbtTag::Compound(compound) = nbt_tag {
-                            pumpkin_nbt::Nbt::from(compound).write_unnamed()
+                        let bytes: Vec<u8> = if let pumpkin_nbt::tag::NbtTag::Compound(compound) = nbt_tag {
+                            match pumpkin_nbt::Nbt::from(compound).write_unnamed() {
+                                Ok(bytes) => bytes.to_vec(),
+                                Err(error) => {
+                                    let message = format!(
+                                        "failed to serialize registry entry {reg_name}/{entry_name}: {error}"
+                                    );
+                                    return quote! { compile_error!(#message); };
+                                }
+                            }
                         } else {
-                            Vec::new().into()
+                            Vec::new()
                         };
                         let byte_literal = Literal::byte_string(&bytes);
 

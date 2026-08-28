@@ -1,5 +1,7 @@
 //! The in-memory representation of individual NBT tags.
 
+use std::sync::Arc;
+
 use compound::NbtCompound;
 use deserializer::NbtReadHelper;
 use serializer::NbtWriteHelper;
@@ -30,7 +32,7 @@ pub enum NbtTag {
     /// An array of 8-bit signed integers.
     ByteArray(Box<[i8]>) = BYTE_ARRAY_ID,
     /// A string.
-    String(Box<str>) = STRING_ID,
+    String(Arc<str>) = STRING_ID,
     /// A sequence of tags.
     List(Vec<Self>) = LIST_ID,
     /// A map of named tags.
@@ -51,7 +53,7 @@ impl NbtTag {
     }
 
     /// Serializes the tag's type ID followed by its payload.
-    pub fn serialize<W: NbtWriteHelper>(self, w: &mut W) -> serializer::Result<()> {
+    pub fn serialize<W: NbtWriteHelper>(&self, w: &mut W) -> serializer::Result<()> {
         w.write_u8(self.get_type_id())?;
         self.serialize_data(w)?;
         Ok(())
@@ -102,38 +104,16 @@ impl NbtTag {
         compound.child_tags.len() == 1 && compound.child_tags.contains_key("")
     }
 
-    /// Wraps the provided tag if needed with the provided element type of list
-    /// the wrapped tag, if any, would be added to.
-    fn wrap_tag_if_needed(element_type: u8, tag: Self) -> Self {
-        if element_type == COMPOUND_ID {
-            if let Self::Compound(compound) = &tag
-                && !Self::is_wrapper_compound(compound)
-            {
-                tag
-            } else {
-                Self::wrap_tag(tag)
-            }
-        } else {
-            tag
-        }
-    }
-
-    fn wrap_tag(tag: Self) -> Self {
-        let mut compound = NbtCompound::new();
-        compound.put("", tag);
-        Self::Compound(compound)
-    }
-
     /// Serializes the tag payload without writing its type ID.
-    pub fn serialize_data<W: NbtWriteHelper>(self, w: &mut W) -> serializer::Result<()> {
+    pub fn serialize_data<W: NbtWriteHelper>(&self, w: &mut W) -> serializer::Result<()> {
         match self {
             Self::End => {}
-            Self::Byte(byte) => w.write_i8(byte)?,
-            Self::Short(short) => w.write_i16(short)?,
-            Self::Int(int) => w.write_i32(int)?,
-            Self::Long(long) => w.write_i64(long)?,
-            Self::Float(float) => w.write_f32(float)?,
-            Self::Double(double) => w.write_f64(double)?,
+            Self::Byte(byte) => w.write_i8(*byte)?,
+            Self::Short(short) => w.write_i16(*short)?,
+            Self::Int(int) => w.write_i32(*int)?,
+            Self::Long(long) => w.write_i64(*long)?,
+            Self::Float(float) => w.write_f32(*float)?,
+            Self::Double(double) => w.write_f64(*double)?,
             Self::ByteArray(byte_array) => {
                 let len = byte_array.len();
                 if len > i32::MAX as usize {
@@ -142,11 +122,11 @@ impl NbtTag {
 
                 w.write_i32(len as i32)?;
                 for int in byte_array {
-                    w.write_i8(int)?;
+                    w.write_i8(*int)?;
                 }
             }
             Self::String(string) => {
-                w.write_string(&string)?;
+                w.write_string(string)?;
             }
             Self::List(list) => {
                 let len = list.len();
@@ -154,7 +134,7 @@ impl NbtTag {
                     return Err(Error::LargeLength(len));
                 }
 
-                let list_element_id = Self::get_list_element_type_id(&list);
+                let list_element_id = Self::get_list_element_type_id(list);
 
                 w.write_u8(list_element_id)?;
                 w.write_i32(len as i32)?;
@@ -162,7 +142,7 @@ impl NbtTag {
                     // Since tags in the same list tag must have the same type,
                     // we need to handle those of different tag types by
                     // wrapping them in `NbtCompound`s if needed.
-                    Self::wrap_tag_if_needed(list_element_id, nbt_tag).serialize_data(w)?;
+                    nbt_tag.serialize_list_element_data(list_element_id, w)?;
                 }
             }
             Self::Compound(compound) => {
@@ -176,7 +156,7 @@ impl NbtTag {
 
                 w.write_i32(len as i32)?;
                 for int in int_array {
-                    w.write_i32(int)?;
+                    w.write_i32(*int)?;
                 }
             }
             Self::LongArray(long_array) => {
@@ -187,10 +167,28 @@ impl NbtTag {
 
                 w.write_i32(len as i32)?;
                 for long in long_array {
-                    w.write_i64(long)?;
+                    w.write_i64(*long)?;
                 }
             }
         }
+        Ok(())
+    }
+
+    fn serialize_list_element_data<W: NbtWriteHelper>(
+        &self,
+        element_type: u8,
+        w: &mut W,
+    ) -> serializer::Result<()> {
+        let needs_wrapper = element_type == COMPOUND_ID
+            && !matches!(self, Self::Compound(compound) if !Self::is_wrapper_compound(compound));
+        if !needs_wrapper {
+            return self.serialize_data(w);
+        }
+
+        w.write_u8(self.get_type_id())?;
+        w.write_string("")?;
+        self.serialize_data(w)?;
+        w.write_u8(END_ID)?;
         Ok(())
     }
 

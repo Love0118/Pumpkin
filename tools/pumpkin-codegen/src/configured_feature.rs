@@ -803,7 +803,29 @@ pub fn value_to_configured_feature(v: &Value) -> TokenStream {
             }
         }
         "minecraft:multiface_growth" => {
-            quote! { ConfiguredFeature::MultifaceGrowth(crate::generation::feature::features::multiface_growth::MultifaceGrowthFeature {}) }
+            let block_name = config["block"].as_str().unwrap_or("minecraft:glow_lichen");
+            let block_name = block_name.strip_prefix("minecraft:").unwrap_or(block_name);
+            let block_ident =
+                syn::Ident::new(&block_name.to_uppercase(), proc_macro2::Span::call_site());
+            let can_be_placed_on = value_to_block_list(&config["can_be_placed_on"]);
+            let can_place_on_floor = config["can_place_on_floor"].as_bool().unwrap_or(false);
+            let can_place_on_ceiling = config["can_place_on_ceiling"].as_bool().unwrap_or(false);
+            let can_place_on_wall = config["can_place_on_wall"].as_bool().unwrap_or(false);
+            let chance_of_spreading = config["chance_of_spreading"].as_f64().unwrap_or(0.5) as f32;
+            let search_range = config["search_range"].as_i64().unwrap_or(20) as i32;
+            quote! {
+                ConfiguredFeature::MultifaceGrowth(
+                    crate::generation::feature::features::multiface_growth::MultifaceGrowthFeature {
+                        block: &pumpkin_data::Block::#block_ident,
+                        can_be_placed_on: (#can_be_placed_on).to_vec(),
+                        can_place_on_floor: #can_place_on_floor,
+                        can_place_on_ceiling: #can_place_on_ceiling,
+                        can_place_on_wall: #can_place_on_wall,
+                        chance_of_spreading: #chance_of_spreading,
+                        search_range: #search_range,
+                    },
+                )
+            }
         }
         "minecraft:blue_ice" => {
             quote! { ConfiguredFeature::BlueIce(crate::generation::feature::features::blue_ice::BlueIceFeature {}) }

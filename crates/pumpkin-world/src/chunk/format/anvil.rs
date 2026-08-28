@@ -5,14 +5,14 @@ use lz4_java_wrc::Context;
 use pumpkin_config::chunk::AnvilChunkConfig;
 use pumpkin_util::math::vector2::Vector2;
 use std::{
-    io::{Read, SeekFrom, Write},
+    io::{Read, Write},
     marker::PhantomData,
     path::{Path, PathBuf},
     pin::Pin,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufWriter},
+    io::{AsyncWrite, AsyncWriteExt, BufWriter},
     sync::Mutex,
 };
 use tracing::{debug, trace};
@@ -20,7 +20,11 @@ use tracing::{debug, trace};
 use crate::chunk::{
     ChunkParsingError, ChunkReadingError, ChunkSerializingError, ChunkWritingError,
     CompressionError,
-    io::{ChunkSerializer, Dirtiable, LoadedData},
+    io::{ChunkSerializer, Dirtiable, LoadedData, decompression_output_limit},
+};
+use crate::{
+    persistence::AsyncAtomicFile,
+    serialization_metrics::{self, SerializationStage},
 };
 
 /// The side size of a region in chunks (one region is 32x32 chunks)
@@ -36,6 +40,7 @@ pub const CHUNK_COUNT: usize = REGION_SIZE * REGION_SIZE;
 
 /// The number of bytes in a sector (4 KiB)
 const SECTOR_BYTES: usize = 4096;
+const MAX_DECOMPRESSED_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
 // 26.2
 pub const WORLD_DATA_VERSION: i32 = 4903;
@@ -126,22 +131,59 @@ impl Compression {
     const CUSTOM_ID: u8 = 127;
 
     fn decompress_data(self, compressed_data: &[u8]) -> Result<Box<[u8]>, CompressionError> {
-        fn decode<R: std::io::Read>(mut reader: R, capacity: usize) -> std::io::Result<Box<[u8]>> {
-            let mut buf = Vec::with_capacity(capacity);
+        self.decompress_data_with_limit(compressed_data, MAX_DECOMPRESSED_CHUNK_BYTES)
+    }
+
+    fn decompress_data_with_limit(
+        self,
+        compressed_data: &[u8],
+        max_decompressed_bytes: usize,
+    ) -> Result<Box<[u8]>, CompressionError> {
+        fn decode<R: std::io::Read>(
+            reader: R,
+            capacity: usize,
+            max_decompressed_bytes: usize,
+        ) -> std::io::Result<Box<[u8]>> {
+            let mut reader = reader.take(max_decompressed_bytes.saturating_add(1) as u64);
+            let mut buf = Vec::with_capacity(capacity.min(max_decompressed_bytes));
             reader.read_to_end(&mut buf)?;
+            if buf.len() > max_decompressed_bytes {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Anvil chunk exceeds decompressed byte limit",
+                ));
+            }
             Ok(buf.into_boxed_slice())
         }
 
         let initial_capacity = compressed_data.len();
+        let output_limit = match self {
+            Self::GZip => decompression_output_limit(initial_capacity, max_decompressed_bytes)
+                .map_err(CompressionError::GZipError)?,
+            Self::ZLib => decompression_output_limit(initial_capacity, max_decompressed_bytes)
+                .map_err(CompressionError::ZlibError)?,
+            Self::LZ4 => decompression_output_limit(initial_capacity, max_decompressed_bytes)
+                .map_err(CompressionError::LZ4Error)?,
+            Self::Custom => return Err(CompressionError::UnknownCompression),
+        };
 
         match self {
-            Self::GZip => decode(GzDecoder::new(compressed_data), initial_capacity)
-                .map_err(CompressionError::GZipError),
-            Self::ZLib => decode(ZlibDecoder::new(compressed_data), initial_capacity)
-                .map_err(CompressionError::ZlibError),
+            Self::GZip => decode(
+                GzDecoder::new(compressed_data),
+                initial_capacity,
+                output_limit,
+            )
+            .map_err(CompressionError::GZipError),
+            Self::ZLib => decode(
+                ZlibDecoder::new(compressed_data),
+                initial_capacity,
+                output_limit,
+            )
+            .map_err(CompressionError::ZlibError),
             Self::LZ4 => decode(
                 lz4_java_wrc::Lz4BlockInput::new(compressed_data),
                 initial_capacity,
+                output_limit,
             )
             .map_err(CompressionError::LZ4Error),
             Self::Custom => Err(CompressionError::UnknownCompression),
@@ -304,6 +346,9 @@ impl AnvilChunkData {
 
             S::from_bytes(&decompress_bytes.into(), pos)
         } else {
+            if self.compressed_data.len() > MAX_DECOMPRESSED_CHUNK_BYTES {
+                return Err(ChunkReadingError::RegionIsInvalid);
+            }
             S::from_bytes(&self.compressed_data, pos)
         }
     }
@@ -320,16 +365,28 @@ impl AnvilChunkData {
             .to_bytes()
             .await
             .map_err(|err| ChunkWritingError::ChunkSerializingError(err.to_string()))?;
+        if raw_bytes.len() > MAX_DECOMPRESSED_CHUNK_BYTES {
+            return Err(ChunkWritingError::ChunkSerializingError(format!(
+                "Anvil chunk exceeds {MAX_DECOMPRESSED_CHUNK_BYTES} decompressed bytes"
+            )));
+        }
+        serialization_metrics::record_snapshot_bytes(raw_bytes.len());
 
         let compression = compression.unwrap_or_else(|| chunk_config.compression.algorithm.into());
         let level = chunk_config.compression.level;
 
         // Offload CPU-heavy compression to blocking thread pool
+        let compress_started = Instant::now();
         let compressed_data =
             tokio::task::spawn_blocking(move || compression.compress_data(&raw_bytes, level))
                 .await
                 .map_err(|err| ChunkWritingError::IoError(std::io::Error::other(err)))?
                 .map_err(ChunkWritingError::Compression)?;
+        serialization_metrics::record_duration(
+            SerializationStage::Compress,
+            compress_started.elapsed(),
+        );
+        serialization_metrics::record_compressed_bytes(compressed_data.len());
 
         Ok(Self {
             compression: Some(compression),
@@ -353,21 +410,23 @@ impl<S: SingleChunkDataSerializer> AnvilChunkFile<S> {
         index as usize
     }
 
-    async fn write_indices<I>(&self, path: &Path, indices: I) -> Result<(), std::io::Error>
+    async fn write_indices<I>(&self, path: &Path, _indices: I) -> Result<(), std::io::Error>
     where
         I: IntoIterator<Item = usize>,
     {
-        trace!("Writing in place: {}", path.display());
+        trace!("Writing atomic Anvil layout: {}", path.display());
 
-        let file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .append(false)
-            .open(path)
-            .await?;
-
+        let file = AsyncAtomicFile::create(path.to_path_buf()).await?;
         let mut write = BufWriter::new(file);
+        self.write_indices_to(&mut write).await?;
+        write.flush().await?;
+        write.into_inner().commit().await
+    }
+
+    async fn write_indices_to(
+        &self,
+        write: &mut (impl AsyncWrite + Unpin + Send),
+    ) -> Result<(), std::io::Error> {
         // The first two sectors are reserved for the location table
         let mut header = Vec::with_capacity(SECTOR_BYTES * 2);
 
@@ -393,39 +452,31 @@ impl<S: SingleChunkDataSerializer> AnvilChunkFile<S> {
         // Write all 8 KiB in a single async call
         write.write_all(&header).await?;
 
-        let mut chunks = indices
-            .into_iter()
-            .filter_map(|index| self.chunks_data[index].as_ref().map(|c| (index, c)))
+        let mut chunks = self
+            .chunks_data
+            .iter()
+            .enumerate()
+            .filter_map(|(index, chunk)| chunk.as_ref().map(|chunk| (index, chunk)))
             .collect::<Vec<_>>();
 
         // Sort such that writes are in order
         chunks.sort_by_key(|chunk| chunk.1.file_sector_offset);
 
-        #[cfg(debug_assertions)]
-        {
-            // Verify we are actually two sectors into the file
-            let current_pos = write.stream_position().await?;
-            assert_eq!(current_pos as usize, 2 * SECTOR_BYTES);
-        };
-
         let mut current_sector = 2;
         for (index, chunk) in chunks {
-            debug_assert!(
-                current_sector <= chunk.file_sector_offset,
-                "Current sector is {} but we want to write to {}!",
-                current_sector,
-                chunk.file_sector_offset
-            );
+            if current_sector > chunk.file_sector_offset {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "overlapping Anvil chunk layout at index {index}: sector {} follows {current_sector}",
+                        chunk.file_sector_offset
+                    ),
+                ));
+            }
 
-            // Seek only if we need to
-            if chunk.file_sector_offset != current_sector {
-                trace!("Seeking to sector {}", chunk.file_sector_offset);
-                let _ = write
-                    .seek(SeekFrom::Start(
-                        chunk.file_sector_offset as u64 * SECTOR_BYTES as u64,
-                    ))
-                    .await?;
-                current_sector = chunk.file_sector_offset;
+            while current_sector < chunk.file_sector_offset {
+                write.write_all(&[0; SECTOR_BYTES]).await?;
+                current_sector += 1;
             }
             trace!(
                 "Writing chunk {} - {}:{}",
@@ -436,20 +487,24 @@ impl<S: SingleChunkDataSerializer> AnvilChunkFile<S> {
 
             current_sector += chunk.serialized_data.sector_count();
 
-            chunk.serialized_data.write(&mut write).await?;
+            chunk.serialized_data.write(&mut *write).await?;
         }
-
-        write.flush().await
+        Ok(())
     }
 
     /// Write entire file, disregarding saved offsets
     async fn write_all(&self, path: &Path) -> Result<(), std::io::Error> {
-        let temp_path = path.with_extension("tmp");
-        trace!("Writing tmp file to disk: {temp_path:?}");
-
-        let file = tokio::fs::File::create(&temp_path).await?;
+        let file = AsyncAtomicFile::create(path.to_path_buf()).await?;
         let mut write = BufWriter::new(file);
+        self.write_all_to(&mut write).await?;
+        write.flush().await?;
+        write.into_inner().commit().await
+    }
 
+    async fn write_all_to(
+        &self,
+        write: &mut (impl AsyncWrite + Unpin + Send),
+    ) -> Result<(), std::io::Error> {
         // Build the 8 KiB header in memory
         let mut header = Vec::with_capacity(SECTOR_BYTES * 2);
         let mut current_sector: u32 = 2;
@@ -479,11 +534,8 @@ impl<S: SingleChunkDataSerializer> AnvilChunkFile<S> {
 
         // Write chunk data
         for chunk in self.chunks_data.iter().flatten() {
-            chunk.serialized_data.write(&mut write).await?;
+            chunk.serialized_data.write(&mut *write).await?;
         }
-
-        write.flush().await?;
-        tokio::fs::rename(temp_path, path).await?;
         Ok(())
     }
 }
@@ -956,7 +1008,7 @@ mod tests {
         // TEST APPEND TO END
 
         chunk_saver
-            .save_chunks(&level_folder, chunks.clone())
+            .save_chunks(&level_folder, chunks.clone(), true)
             .await
             .expect("Failed to write chunk");
 
@@ -1014,7 +1066,7 @@ mod tests {
         drop(chunk);
 
         chunk_saver
-            .save_chunks(&level_folder, chunks.clone())
+            .save_chunks(&level_folder, chunks.clone(), true)
             .await
             .expect("Failed to write chunk");
 
@@ -1087,7 +1139,7 @@ mod tests {
         drop(chunk);
 
         chunk_saver
-            .save_chunks(&level_folder, chunks.clone())
+            .save_chunks(&level_folder, chunks.clone(), true)
             .await
             .expect("Failed to write chunk");
 
@@ -1148,7 +1200,7 @@ mod tests {
         drop(chunk);
 
         chunk_saver
-            .save_chunks(&level_folder, chunks.clone())
+            .save_chunks(&level_folder, chunks.clone(), true)
             .await
             .expect("Failed to write chunk");
 
@@ -1237,7 +1289,7 @@ mod tests {
             }
 
             chunk_saver
-                .save_chunks(&level_folder, chunks.clone())
+                .save_chunks(&level_folder, chunks.clone(), true)
                 .await
                 .expect("Failed to write chunk");
 
@@ -1330,7 +1382,115 @@ mod tests {
  */
 #[cfg(test)]
 mod tests {
-    use super::{Compression, CompressionError};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    use bytes::Bytes;
+    use pumpkin_config::chunk::AnvilChunkConfig;
+    use pumpkin_util::math::vector2::Vector2;
+    use tempfile::tempdir;
+    use tokio::io::AsyncWrite;
+
+    use super::{
+        AnvilChunkFile, Compression, CompressionError, SECTOR_BYTES, SingleChunkDataSerializer,
+    };
+    use crate::chunk::io::{ChunkSerializer, Dirtiable, LoadedData};
+    use crate::chunk::{ChunkReadingError, ChunkSerializingError};
+    use crate::persistence::AsyncAtomicFile;
+
+    struct FailAfter<W> {
+        inner: W,
+        remaining: usize,
+    }
+
+    impl<W> FailAfter<W> {
+        const fn new(inner: W, remaining: usize) -> Self {
+            Self { inner, remaining }
+        }
+    }
+
+    impl<W: AsyncWrite + Unpin> AsyncWrite for FailAfter<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.remaining == 0 {
+                return Poll::Ready(Err(std::io::Error::other("injected Anvil write failure")));
+            }
+            let allowed = buffer.len().min(self.remaining);
+            match Pin::new(&mut self.inner).poll_write(context, &buffer[..allowed]) {
+                Poll::Ready(Ok(written)) => {
+                    self.remaining -= written;
+                    Poll::Ready(Ok(written))
+                }
+                result => result,
+            }
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(context)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(context)
+        }
+    }
+
+    struct MockChunk {
+        position: Vector2<i32>,
+        data: Bytes,
+        dirty: AtomicBool,
+    }
+
+    impl MockChunk {
+        fn new(data: &'static [u8]) -> Self {
+            Self {
+                position: Vector2::new(0, 0),
+                data: Bytes::from_static(data),
+                dirty: AtomicBool::new(true),
+            }
+        }
+    }
+
+    impl Dirtiable for MockChunk {
+        fn is_dirty(&self) -> bool {
+            self.dirty.load(Ordering::Acquire)
+        }
+
+        fn mark_dirty(&self, dirty: bool) {
+            self.dirty.store(dirty, Ordering::Release);
+        }
+    }
+
+    impl SingleChunkDataSerializer for MockChunk {
+        fn to_bytes(
+            &self,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<Bytes, ChunkSerializingError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(self.data.clone()) })
+        }
+
+        fn from_bytes(bytes: &Bytes, pos: Vector2<i32>) -> Result<Self, ChunkReadingError> {
+            Ok(Self {
+                position: pos,
+                data: bytes.clone(),
+                dirty: AtomicBool::new(false),
+            })
+        }
+
+        fn position(&self) -> (i32, i32) {
+            (self.position.x, self.position.y)
+        }
+    }
 
     #[test]
     fn custom_compression_returns_unknown_compression_error() {
@@ -1346,5 +1506,139 @@ mod tests {
             Compression::Custom.decompress_data(b"chunk data"),
             Err(CompressionError::UnknownCompression)
         ));
+    }
+
+    #[test]
+    fn supported_compression_schemes_enforce_decompressed_limit() {
+        for compression in [Compression::GZip, Compression::ZLib, Compression::LZ4] {
+            let compressed = compression.compress_data(&[7; 129], 6).unwrap();
+            assert!(
+                compression
+                    .decompress_data_with_limit(&compressed, 128)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn stream_compression_schemes_reject_hostile_ratio_and_custom_is_explicit() {
+        let raw = vec![0; 1024 * 1024];
+        for compression in [Compression::GZip, Compression::ZLib] {
+            let compressed = compression.compress_data(&raw, 9).unwrap();
+            assert!(
+                compression
+                    .decompress_data_with_limit(&compressed, raw.len())
+                    .is_err()
+            );
+        }
+        assert!(matches!(
+            Compression::Custom.decompress_data_with_limit(&[], raw.len()),
+            Err(CompressionError::UnknownCompression)
+        ));
+    }
+
+    #[test]
+    fn supported_compression_accepts_legitimate_payload_at_test_limit() {
+        let mut state = 0x1234_5678_u32;
+        let raw = (0..1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        for compression in [Compression::GZip, Compression::ZLib, Compression::LZ4] {
+            let compressed = compression.compress_data(&raw, 6).unwrap();
+            assert_eq!(
+                compression
+                    .decompress_data_with_limit(&compressed, raw.len())
+                    .unwrap()
+                    .as_ref(),
+                raw.as_slice()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_update_uses_atomic_replacement_and_roundtrips() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("r.0.0.mca");
+        let config = AnvilChunkConfig {
+            write_in_place: true,
+            ..Default::default()
+        };
+
+        let mut region = AnvilChunkFile::<MockChunk>::default();
+        region
+            .update_chunk(&MockChunk::new(b"old"), &config)
+            .await
+            .unwrap();
+        region.write(&path).await.unwrap();
+
+        let raw = tokio::fs::read(&path).await.unwrap();
+        let mut region = AnvilChunkFile::<MockChunk>::read(Bytes::from(raw)).unwrap();
+        region
+            .update_chunk(&MockChunk::new(b"new"), &config)
+            .await
+            .unwrap();
+        region.write(&path).await.unwrap();
+
+        let raw = tokio::fs::read(&path).await.unwrap();
+        let region = AnvilChunkFile::<MockChunk>::read(Bytes::from(raw)).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        region.get_chunks(vec![Vector2::new(0, 0)], sender).await;
+        match receiver.recv().await.unwrap() {
+            LoadedData::Loaded(chunk) => assert_eq!(&chunk.data[..], b"new"),
+            LoadedData::Missing(position) => panic!("missing chunk at {position:?}"),
+            LoadedData::Error((position, error)) => {
+                panic!("failed to load chunk at {position:?}: {error}")
+            }
+        }
+
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn header_and_data_write_failures_leave_old_region_valid() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("r.0.0.mca");
+        let config = AnvilChunkConfig::default();
+
+        let mut region = AnvilChunkFile::<MockChunk>::default();
+        region
+            .update_chunk(&MockChunk::new(b"old"), &config)
+            .await
+            .unwrap();
+        region.write(&path).await.unwrap();
+
+        let raw = tokio::fs::read(&path).await.unwrap();
+        let mut updated = AnvilChunkFile::<MockChunk>::read(Bytes::from(raw)).unwrap();
+        updated
+            .update_chunk(&MockChunk::new(b"new"), &config)
+            .await
+            .unwrap();
+
+        for failure_offset in [SECTOR_BYTES / 2, SECTOR_BYTES * 2 + 2] {
+            let file = AsyncAtomicFile::create(path.clone()).await.unwrap();
+            let mut writer = FailAfter::new(file, failure_offset);
+            assert!(updated.write_all_to(&mut writer).await.is_err());
+            drop(writer);
+
+            let raw = tokio::fs::read(&path).await.unwrap();
+            let old_region = AnvilChunkFile::<MockChunk>::read(Bytes::from(raw)).unwrap();
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+            old_region
+                .get_chunks(vec![Vector2::new(0, 0)], sender)
+                .await;
+            match receiver.recv().await.unwrap() {
+                LoadedData::Loaded(chunk) => assert_eq!(&chunk.data[..], b"old"),
+                LoadedData::Missing(position) => panic!("missing chunk at {position:?}"),
+                LoadedData::Error((position, error)) => {
+                    panic!("failed to load chunk at {position:?}: {error}")
+                }
+            }
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
     }
 }

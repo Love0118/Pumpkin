@@ -368,7 +368,11 @@ impl BedrockClient {
                         let world = player.world();
                         if let Some(target) = world.get_entity_by_id(target_runtime_id) {
                             let mut stack = player.inventory().held_item().await;
-                            if !target.interact(player, &mut stack).await {
+                            if target
+                                .interact_result(player, &mut stack)
+                                .await
+                                .should_run_item_fallback()
+                            {
                                 let Some(server) = world.server.upgrade() else {
                                     return;
                                 };

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use tracing::{debug, error};
 use uuid::Uuid;
 
+use crate::persistence::atomic_write;
+
 /// Manages the storage and retrieval of player data from disk and memory cache.
 ///
 /// This struct provides functions to load and save player data to/from NBT files,
@@ -97,7 +99,12 @@ impl PlayerDataStorage {
         };
 
         match pumpkin_nbt::nbt_compress::read_gzip_compound_tag(file) {
-            Ok(nbt) => {
+            Ok(mut nbt) => {
+                crate::world_info::schema::migrate_persistent_root(
+                    crate::world_info::schema::PersistentRootSchema::Player,
+                    &mut nbt,
+                )
+                .map_err(|error| PlayerDataError::Nbt(error.to_string()))?;
                 debug!("Loaded player data for {uuid} from disk");
                 Ok((true, nbt))
             }
@@ -121,7 +128,11 @@ impl PlayerDataStorage {
     /// # Returns
     ///
     /// A Result indicating success or the error that occurred.
-    pub fn save_player_data(&self, uuid: &Uuid, data: NbtCompound) -> Result<(), PlayerDataError> {
+    pub fn save_player_data(
+        &self,
+        uuid: &Uuid,
+        mut data: NbtCompound,
+    ) -> Result<(), PlayerDataError> {
         // Skip saving if disabled in config
         if !self.is_save_enabled() {
             return Ok(());
@@ -137,21 +148,83 @@ impl PlayerDataStorage {
             return Err(PlayerDataError::Io(e));
         }
 
-        // Create the file and write directly with GZip compression
-        match File::create(&path) {
-            Ok(file) => {
-                if let Err(e) = pumpkin_nbt::nbt_compress::write_gzip_compound_tag(data, file) {
-                    error!("Failed to write compressed player data for {uuid}: {e}");
-                    Err(PlayerDataError::Nbt(e.to_string()))
-                } else {
-                    debug!("Saved player data for {uuid} to disk");
-                    Ok(())
-                }
-            }
-            Err(e) => {
-                error!("Failed to create player data file for {uuid}: {e}");
-                Err(PlayerDataError::Io(e))
-            }
-        }
+        data.put_int(
+            "DataVersion",
+            crate::world_info::MAXIMUM_SUPPORTED_WORLD_DATA_VERSION,
+        );
+        atomic_write(&path, |file| {
+            pumpkin_nbt::nbt_compress::write_gzip_compound_tag(data, file)
+                .map_err(|error| PlayerDataError::Nbt(error.to_string()))
+        })?;
+        debug!("Saved player data for {uuid} to disk");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world_info::{
+        MAXIMUM_SUPPORTED_WORLD_DATA_VERSION, MINIMUM_SUPPORTED_WORLD_DATA_VERSION,
+    };
+    use tempfile::tempdir;
+
+    #[test]
+    fn versioned_player_disk_restart_migrates_known_and_preserves_unknown() {
+        let directory = tempdir().unwrap();
+        let storage = PlayerDataStorage::new(directory.path(), true);
+        let uuid = Uuid::new_v4();
+        let path = storage.get_player_data_path(&uuid);
+        let mut legacy = NbtCompound::new();
+        legacy.put_int("DataVersion", MINIMUM_SUPPORTED_WORLD_DATA_VERSION);
+        legacy.put_byte("playerGameType", 1);
+        legacy.put_int("SpawnX", 4);
+        legacy.put_int("SpawnY", 70);
+        legacy.put_int("SpawnZ", -8);
+        legacy.put_string("plugin:marker", "kept");
+        pumpkin_nbt::nbt_compress::write_gzip_compound_tag(legacy, File::create(&path).unwrap())
+            .unwrap();
+
+        let (existed, migrated) = storage.load_player_data(&uuid).unwrap();
+        assert!(existed);
+        assert_eq!(
+            migrated.get_int("DataVersion"),
+            Some(MAXIMUM_SUPPORTED_WORLD_DATA_VERSION)
+        );
+        assert_eq!(migrated.get_int("playerGameType"), Some(1));
+        assert_eq!(migrated.get_string("plugin:marker"), Some("kept"));
+        assert_eq!(
+            migrated
+                .get_compound("respawn")
+                .and_then(|respawn| respawn.get_int_array("pos")),
+            Some([4, 70, -8].as_slice())
+        );
+
+        storage.save_player_data(&uuid, migrated).unwrap();
+        let (_, restarted) = storage.load_player_data(&uuid).unwrap();
+        assert_eq!(restarted.get_string("plugin:marker"), Some("kept"));
+        assert_eq!(
+            restarted.get_int("DataVersion"),
+            Some(MAXIMUM_SUPPORTED_WORLD_DATA_VERSION)
+        );
+    }
+
+    #[test]
+    fn player_disk_load_rejects_future_version() {
+        let directory = tempdir().unwrap();
+        let storage = PlayerDataStorage::new(directory.path(), true);
+        let uuid = Uuid::new_v4();
+        let mut future = NbtCompound::new();
+        future.put_int("DataVersion", MAXIMUM_SUPPORTED_WORLD_DATA_VERSION + 1);
+        pumpkin_nbt::nbt_compress::write_gzip_compound_tag(
+            future,
+            File::create(storage.get_player_data_path(&uuid)).unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            storage.load_player_data(&uuid),
+            Err(PlayerDataError::Nbt(message)) if message.contains("Unsupported player DataVersion")
+        ));
     }
 }

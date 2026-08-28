@@ -17,7 +17,11 @@ impl BedrockClient {
                 };
 
                 let mut stack = player.inventory().held_item().await;
-                if !target.interact(player, &mut stack).await {
+                if target
+                    .interact_result(player, &mut stack)
+                    .await
+                    .should_run_item_fallback()
+                {
                     server
                         .item_registry
                         .use_on_entity(&mut stack, player, target)

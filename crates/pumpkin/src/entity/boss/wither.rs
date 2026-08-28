@@ -277,7 +277,8 @@ impl WitherEntity {
 
         for &uid in &current {
             if !bossbar_players.contains(&uid) {
-                if let Some(p) = players.iter().find(|p| p.gameprofile.id == uid) {
+                let player = players.iter().find(|p| p.gameprofile.id == uid).cloned();
+                if let Some(p) = player {
                     let mut bar = self.make_bossbar();
                     bar.health = progress;
                     p.send_bossbar(&bar).await;
@@ -293,7 +294,8 @@ impl WitherEntity {
             .collect();
 
         for uid in &to_remove {
-            if let Some(p) = players.iter().find(|p| &p.gameprofile.id == uid) {
+            let player = players.iter().find(|p| &p.gameprofile.id == uid).cloned();
+            if let Some(p) = player {
                 p.remove_bossbar(self.bossbar_uuid).await;
             }
             bossbar_players.retain(|u| u != uid);

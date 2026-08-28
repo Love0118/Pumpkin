@@ -1,4 +1,4 @@
-use pumpkin_util::math::vector3::Vector3;
+use pumpkin_util::math::{position::BlockPos, vector3::Vector3};
 
 use crate::entity::living::LivingEntity;
 
@@ -147,6 +147,19 @@ impl Navigator {
             .is_some_and(|path| path.can_reach() || path.get_dist_to_target() <= distance)
     }
 
+    /// Matches `TargetGoal.canReach`: a target is reachable when pathfinding produces an end
+    /// node within 1.5 horizontal blocks of the target's block position.
+    pub async fn can_reach_target(
+        &mut self,
+        entity: &LivingEntity,
+        destination: Vector3<f64>,
+    ) -> bool {
+        let target_block = destination.floor_to_i32();
+        self.compute_path(entity, destination)
+            .await
+            .is_some_and(|path| path_end_reaches_target(&path, target_block))
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn compute_path(
         &mut self,
@@ -154,7 +167,7 @@ impl Navigator {
         destination: Vector3<f64>,
     ) -> Option<Path> {
         let start_pos_f = entity.entity.pos.load();
-        let start_block_vec = start_pos_f.to_i32();
+        let start_block_vec = start_pos_f.floor_to_i32();
         let mob_position = Vector3::new(start_block_vec.x, start_block_vec.y, start_block_vec.z);
 
         let context = PathfindingContext::new(mob_position, entity.entity.world.load_full());
@@ -175,7 +188,9 @@ impl Navigator {
 
         let mut start_node = self.evaluator.get_start().await?;
 
-        let mut target = self.evaluator.get_target(destination.to_block_pos());
+        let mut target = self
+            .evaluator
+            .get_target(BlockPos(destination.floor_to_i32()));
 
         start_node.g = 0.0;
         let start_dist = start_node.distance(&target);
@@ -321,7 +336,9 @@ impl Navigator {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub async fn tick(&mut self, entity: &LivingEntity) {
+    pub async fn tick(&mut self, mob: &dyn crate::entity::mob::Mob) {
+        let mob_entity = mob.get_mob_entity();
+        let entity = &mob_entity.living_entity;
         let Some(goal) = self.current_goal.take() else {
             // Idle: stop the mob
             self.is_idle.store(true, Ordering::Relaxed);
@@ -451,13 +468,11 @@ impl Navigator {
                 if dy > entity.get_attribute_value(&Attributes::STEP_HEIGHT)
                     && horizontal_dist_sq < jump_distance
                 {
-                    entity
-                        .jumping
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                } else {
-                    entity
-                        .jumping
-                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                    mob_entity
+                        .jump_control
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .request_jump();
                 }
             } else {
                 self.is_idle.store(true, Ordering::Relaxed);
@@ -482,5 +497,31 @@ impl Navigator {
     #[must_use]
     pub const fn get_path_mut(&mut self) -> Option<&mut Path> {
         self.current_path.as_mut()
+    }
+}
+
+fn path_end_reaches_target(path: &Path, target: Vector3<i32>) -> bool {
+    path.get_end_node().is_some_and(|end| {
+        let dx = end.pos.0.x - target.x;
+        let dz = end.pos.0.z - target.z;
+        (dx * dx + dz * dz) as f64 <= 2.25
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_end_reaches_target;
+    use crate::entity::ai::pathfinder::{node::Node, path::Path};
+    use pumpkin_util::math::{position::BlockPos, vector3::Vector3};
+
+    #[test]
+    fn target_reach_uses_vanilla_horizontal_end_node_threshold() {
+        let target = Vector3::new(10, 4, 10);
+        let diagonal_end = Path::new(vec![Node::new(BlockPos::new(9, 8, 9))], target, false);
+        let two_blocks_away = Path::new(vec![Node::new(BlockPos::new(8, 4, 10))], target, false);
+
+        assert!(path_end_reaches_target(&diagonal_end, target));
+        assert!(!path_end_reaches_target(&two_blocks_away, target));
+        assert!(!path_end_reaches_target(&Path::empty(target), target));
     }
 }

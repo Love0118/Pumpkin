@@ -1,6 +1,6 @@
 use super::chunk_state::{Chunk, StagedChunkEnum};
 use super::generation_cache::Cache;
-use super::{ChunkPos, IOLock};
+use super::{ChunkPos, ChunkWriteRequest, IOLock, release_io_locks};
 use crate::ProtoChunk;
 use crate::chunk::format::LightContainer;
 use crate::chunk::io::LoadedData::Loaded;
@@ -10,10 +10,9 @@ use crossfire::compat::AsyncRx;
 use pumpkin_config::lighting::LightingEngineConfig;
 use pumpkin_data::chunk::ChunkStatus;
 use pumpkin_data::chunk_gen_settings::GenerationSettings;
-use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 pub enum RecvChunk {
     IO(Chunk),
@@ -174,10 +173,19 @@ pub async fn io_read_work(
     debug!("io read thread stop");
 }
 
-pub async fn io_write_work(recv: AsyncRx<Vec<(ChunkPos, Chunk)>>, level: Arc<Level>, lock: IOLock) {
+pub async fn io_write_work(recv: AsyncRx<ChunkWriteRequest>, level: Arc<Level>, lock: IOLock) {
     loop {
         // Don't check cancel_token here (keep saving chunks)
-        let Ok(data) = recv.recv().await else { break };
+        let Ok(request) = recv.recv().await else {
+            break;
+        };
+        let ChunkWriteRequest {
+            chunks: data,
+            force_flush,
+            completions,
+            queue_guard,
+        } = request;
+        drop(queue_guard);
         // debug!("io write thread receive chunks size {}", data.len());
         let mut vec = Vec::with_capacity(data.len());
         let mut positions = Vec::with_capacity(data.len());
@@ -197,38 +205,19 @@ pub async fn io_write_work(recv: AsyncRx<Vec<(ChunkPos, Chunk)>>, level: Arc<Lev
                 }
             }
         }
-        if let Err(e) = level
+        let save_result = level
             .chunk_saver
-            .save_chunks(&level.level_folder, vec)
+            .save_chunks(&level.level_folder, vec, force_flush)
             .await
-        {
+            .map_err(|error| error.to_string());
+        if let Err(e) = &save_result {
             error!("Failed to save chunks: {:?}", e);
         }
 
-        for i in positions {
-            let mut data = lock
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match data.entry(i) {
-                Entry::Occupied(mut entry) => {
-                    let rc = entry.get_mut();
-                    if *rc == 1 {
-                        entry.remove();
-                        drop(data);
-                        lock.1.notify_waiters();
-                    } else {
-                        *rc -= 1;
-                    }
-                }
-                Entry::Vacant(_) => {
-                    warn!(
-                        "io_write: attempted to release missing lock entry for {:?}",
-                        i
-                    );
-                    // continue without panicking to avoid crashing on shutdown races
-                }
-            }
+        release_io_locks(&lock, positions);
+
+        for completion in completions {
+            let _ = completion.send(save_result.clone());
         }
     }
 }

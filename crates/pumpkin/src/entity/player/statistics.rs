@@ -3,7 +3,7 @@ use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_nbt::tag::NbtTag;
 use std::collections::HashMap;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Statistics {
     /// (Category ID, Statistic ID) -> Value
     pub stats: HashMap<(i32, i32), i32>,

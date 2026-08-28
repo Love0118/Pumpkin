@@ -7,7 +7,8 @@ impl JavaClient {
             player.clone(),
             packet.selected_slot.0 as u8,
         );
-        if let Some(server) = player.world().server.upgrade() {
+        let server = player.world().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut event).await;
         }
         if event.cancelled {

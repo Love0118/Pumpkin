@@ -211,6 +211,6 @@ impl PacketWrite for Cow<'_, str> {
 
 impl PacketWrite for NbtCompound {
     fn write<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
-        writer.write_all(&Nbt::from(self.clone()).write_bedrock())
+        Nbt::write_compound_to_writer_bedrock(self, writer).map_err(Error::other)
     }
 }

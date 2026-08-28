@@ -23,6 +23,59 @@ pub trait MetadataSerializer {
         writer: &mut impl std::io::Write,
         version: &JavaMinecraftVersion,
     ) -> Result<(), WritingError>;
+
+    fn write_metadata_for_type(
+        &self,
+        writer: &mut impl std::io::Write,
+        version: &JavaMinecraftVersion,
+        metadata_type: MetaDataType,
+    ) -> Result<(), WritingError> {
+        if matches!(
+            metadata_type,
+            MetaDataType::BLOCK_STATE | MetaDataType::ITEM_STACK | MetaDataType::PARTICLE
+        ) {
+            let mut serialized = Vec::new();
+            self.write_metadata(&mut serialized, version)?;
+            let mut cursor = Cursor::new(serialized);
+
+            if metadata_type == MetaDataType::BLOCK_STATE {
+                let state = VarInt::decode(&mut cursor).map_err(|error| {
+                    WritingError::Message(format!("Failed to decode block state metadata: {error}"))
+                })?;
+                let state = u16::try_from(state.0).map_or(state, |state_id| {
+                    VarInt(i32::from(remap_block_state_for_version(state_id, *version)))
+                });
+                return writer.write_var_int(&state);
+            }
+
+            if metadata_type == MetaDataType::ITEM_STACK {
+                let count = VarInt::decode(&mut cursor).map_err(|error| {
+                    WritingError::Message(format!("Failed to decode item stack count: {error}"))
+                })?;
+                writer.write_var_int(&count)?;
+                if count.0 > 0 {
+                    let item_id = VarInt::decode(&mut cursor).map_err(|error| {
+                        WritingError::Message(format!("Failed to decode item id: {error}"))
+                    })?;
+                    let remapped_id = u16::try_from(item_id.0)
+                        .map_or(0, |id| remap_item_id_for_version(id, *version));
+                    writer.write_var_int(&VarInt(i32::from(remapped_id)))?;
+                    let remainder_start = cursor.position() as usize;
+                    writer.write_slice(&cursor.into_inner()[remainder_start..])?;
+                }
+                return Ok(());
+            }
+
+            let particle_id = VarInt::decode(&mut cursor).map_err(|error| {
+                WritingError::Message(format!("Failed to decode particle metadata: {error}"))
+            })?;
+            writer.write_var_int(&particle_id_for_version(particle_id, *version))?;
+            let remainder_start = cursor.position() as usize;
+            writer.write_slice(&cursor.into_inner()[remainder_start..])?;
+            return Ok(());
+        }
+        self.write_metadata(writer, version)
+    }
 }
 
 impl<T: MetadataSerializer + ?Sized> MetadataSerializer for &T {
@@ -32,6 +85,15 @@ impl<T: MetadataSerializer + ?Sized> MetadataSerializer for &T {
         version: &JavaMinecraftVersion,
     ) -> Result<(), WritingError> {
         (*self).write_metadata(writer, version)
+    }
+
+    fn write_metadata_for_type(
+        &self,
+        writer: &mut impl std::io::Write,
+        version: &JavaMinecraftVersion,
+        metadata_type: MetaDataType,
+    ) -> Result<(), WritingError> {
+        (*self).write_metadata_for_type(writer, version, metadata_type)
     }
 }
 
@@ -141,63 +203,8 @@ impl<T> Metadata<T> {
         writer.write_u8(resolved_index)?;
         writer.write_var_int(&VarInt(remapped_type_id))?;
 
-        if self.r#type == MetaDataType::BLOCK_STATE {
-            let mut serialized_value = Vec::new();
-            self.value.write_metadata(&mut serialized_value, version)?;
-
-            let mut cursor = Cursor::new(serialized_value);
-            let decoded_state = VarInt::decode(&mut cursor).map_err(|e| {
-                WritingError::Message(format!("Failed to decode block state metadata: {e}"))
-            })?;
-            let remapped_state = u16::try_from(decoded_state.0).map_or(decoded_state, |state_id| {
-                VarInt(i32::from(remap_block_state_for_version(state_id, *version)))
-            });
-            writer.write_var_int(&remapped_state)?;
-            return Ok(());
-        }
-
-        if self.r#type == MetaDataType::ITEM_STACK {
-            let mut serialized_value = Vec::new();
-            self.value.write_metadata(&mut serialized_value, version)?;
-
-            let mut cursor = Cursor::new(serialized_value);
-            let item_count = VarInt::decode(&mut cursor).map_err(|e| {
-                WritingError::Message(format!("Failed to decodeitem stack count: {e}"))
-            })?;
-
-            if item_count.0 <= 0 {
-                writer.write_var_int(&item_count)?;
-            } else {
-                let item_id = VarInt::decode(&mut cursor)
-                    .map_err(|e| WritingError::Message(format!("Failed to decode item id: {e}")))?;
-                let remapped_id = u16::try_from(item_id.0)
-                    .map_or(0, |id| remap_item_id_for_version(id, *version));
-                writer.write_var_int(&item_count)?;
-                writer.write_var_int(&VarInt(i32::from(remapped_id)))?;
-                let remainder_start = cursor.position() as usize;
-                let inner = cursor.into_inner();
-                writer.write_slice(&inner[remainder_start..])?;
-            }
-            return Ok(());
-        }
-
-        if self.r#type == MetaDataType::PARTICLE {
-            let mut serialized_value = Vec::new();
-            self.value.write_metadata(&mut serialized_value, version)?;
-
-            let mut cursor = Cursor::new(serialized_value);
-            let particle_id = VarInt::decode(&mut cursor).map_err(|e| {
-                WritingError::Message(format!("Failed to decode particle metadata: {e}"))
-            })?;
-            writer.write_var_int(&particle_id_for_version(particle_id, *version))?;
-
-            let remainder_start = cursor.position() as usize;
-            let inner = cursor.into_inner();
-            writer.write_slice(&inner[remainder_start..])?;
-            return Ok(());
-        }
-
-        self.value.write_metadata(&mut writer, version)?;
+        self.value
+            .write_metadata_for_type(&mut writer, version, self.r#type)?;
 
         Ok(())
     }
@@ -263,6 +270,16 @@ impl MetadataSerializer for i32 {
     }
 }
 
+impl MetadataSerializer for i64 {
+    fn write_metadata(
+        &self,
+        writer: &mut impl std::io::Write,
+        _version: &JavaMinecraftVersion,
+    ) -> Result<(), WritingError> {
+        writer.write_i64(*self)
+    }
+}
+
 impl MetadataSerializer for u32 {
     fn write_metadata(
         &self,
@@ -290,6 +307,24 @@ impl MetadataSerializer for VarInt {
         _version: &JavaMinecraftVersion,
     ) -> Result<(), WritingError> {
         writer.write_var_int(self)
+    }
+
+    fn write_metadata_for_type(
+        &self,
+        writer: &mut impl std::io::Write,
+        version: &JavaMinecraftVersion,
+        metadata_type: MetaDataType,
+    ) -> Result<(), WritingError> {
+        let value = if metadata_type == MetaDataType::BLOCK_STATE {
+            u16::try_from(self.0).map_or(*self, |state_id| {
+                Self(i32::from(remap_block_state_for_version(state_id, *version)))
+            })
+        } else if metadata_type == MetaDataType::PARTICLE {
+            particle_id_for_version(*self, *version)
+        } else {
+            *self
+        };
+        writer.write_var_int(&value)
     }
 }
 
@@ -341,6 +376,19 @@ impl MetadataSerializer for crate::codec::item_stack_seralizer::ItemStackSeriali
         _version: &JavaMinecraftVersion,
     ) -> Result<(), WritingError> {
         self.write(writer)
+    }
+
+    fn write_metadata_for_type(
+        &self,
+        writer: &mut impl std::io::Write,
+        version: &JavaMinecraftVersion,
+        metadata_type: MetaDataType,
+    ) -> Result<(), WritingError> {
+        if metadata_type == MetaDataType::ITEM_STACK {
+            self.write_with_version(writer, version)
+        } else {
+            self.write(writer)
+        }
     }
 }
 
@@ -427,12 +475,24 @@ impl MetadataSerializer for Option<uuid::Uuid> {
 mod tests {
     use std::io::{Cursor, Read};
 
-    use pumpkin_data::{meta_data_type::MetaDataType, particle::Particle};
+    use pumpkin_data::{
+        block_state_remap::remap_block_state_for_version, item::Item, item_stack::ItemStack,
+        meta_data_type::MetaDataType, particle::Particle,
+    };
     use pumpkin_util::version::JavaMinecraftVersion;
 
-    use crate::{VarInt, ser::NetworkWriteExt};
+    use crate::{VarInt, codec::item_stack_seralizer::ItemStackSerializer, ser::NetworkWriteExt};
 
-    use super::{Metadata, MetadataSerializer};
+    use super::{Metadata, MetadataSerializer, particle_id_for_version};
+
+    #[test]
+    fn long_metadata_uses_the_protocol_big_endian_encoding() {
+        let mut encoded = Vec::new();
+        0x0102_0304_0506_0708_i64
+            .write_metadata(&mut encoded, &JavaMinecraftVersion::V_1_21_5)
+            .unwrap();
+        assert_eq!(encoded, 0x0102_0304_0506_0708_i64.to_be_bytes());
+    }
 
     struct ParticleMetadata {
         particle_id: VarInt,
@@ -447,6 +507,20 @@ mod tests {
         ) -> Result<(), crate::WritingError> {
             writer.write_var_int(&self.particle_id)?;
             writer.write_slice(&self.data)
+        }
+
+        fn write_metadata_for_type(
+            &self,
+            writer: &mut impl std::io::Write,
+            version: &JavaMinecraftVersion,
+            metadata_type: MetaDataType,
+        ) -> Result<(), crate::WritingError> {
+            if metadata_type == MetaDataType::PARTICLE {
+                writer.write_var_int(&particle_id_for_version(self.particle_id, *version))?;
+                writer.write_slice(&self.data)
+            } else {
+                self.write_metadata(writer, version)
+            }
         }
     }
 
@@ -473,6 +547,39 @@ mod tests {
         let mut remainder = Vec::new();
         cursor.read_to_end(&mut remainder).unwrap();
         (particle_id, remainder)
+    }
+
+    #[test]
+    fn block_state_metadata_remaps_without_temporary_reencoding() {
+        let version = JavaMinecraftVersion::V_1_20;
+        let state = 1_000u16;
+        let mut bytes = Vec::new();
+        VarInt(i32::from(state))
+            .write_metadata_for_type(&mut bytes, &version, MetaDataType::BLOCK_STATE)
+            .unwrap();
+
+        let mut cursor = Cursor::new(bytes);
+        let remapped_state = VarInt::decode(&mut cursor).unwrap();
+        assert_eq!(
+            remapped_state,
+            VarInt(i32::from(remap_block_state_for_version(state, version)))
+        );
+    }
+
+    #[test]
+    fn item_metadata_writes_the_versioned_serializer_directly() {
+        let version = JavaMinecraftVersion::V_1_20;
+        let serializer = ItemStackSerializer::from(ItemStack::new(1, &Item::MACE));
+        let mut actual = Vec::new();
+        serializer
+            .write_metadata_for_type(&mut actual, &version, MetaDataType::ITEM_STACK)
+            .unwrap();
+
+        let mut expected = Vec::new();
+        serializer
+            .write_with_version(&mut expected, &version)
+            .unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]

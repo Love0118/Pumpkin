@@ -26,13 +26,13 @@ pub trait NbtDataSource<'a> {
     fn read_byte_array(&mut self, len: usize) -> Result<Cow<'a, [i8]>>;
 }
 
-/// Adapts a [`Read`] and [`Seek`] stream into an [`NbtDataSource`].
+/// Adapts a forward-only [`Read`] stream into an [`NbtDataSource`].
 pub struct NbtStreamReader<R>(
     /// Wrapped input stream.
     pub R,
 );
 
-impl<'a, R: Read + Seek> NbtDataSource<'a> for NbtStreamReader<R> {
+impl<'a, R: Read> NbtDataSource<'a> for NbtStreamReader<R> {
     fn read_u8(&mut self) -> Result<u8> {
         let mut buf = [0u8; 1];
         self.0.read_exact(&mut buf).map_err(Error::Incomplete)?;
@@ -44,9 +44,22 @@ impl<'a, R: Read + Seek> NbtDataSource<'a> for NbtStreamReader<R> {
     }
 
     fn seek_relative(&mut self, offset: i64) -> Result<()> {
-        self.0
-            .seek(SeekFrom::Current(offset))
-            .map_err(Error::Incomplete)?;
+        if offset < 0 {
+            return Err(Error::Incomplete(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "NBT stream reader cannot seek backwards",
+            )));
+        }
+
+        let mut remaining = offset as u64;
+        let mut discard = [0u8; 8 * 1024];
+        while remaining > 0 {
+            let read_len = remaining.min(discard.len() as u64) as usize;
+            self.0
+                .read_exact(&mut discard[..read_len])
+                .map_err(Error::Incomplete)?;
+            remaining -= read_len as u64;
+        }
         Ok(())
     }
 
@@ -292,8 +305,11 @@ impl<'a, D: NbtDataSource<'a>> NbtReadHelper<'a> for NbtReadHelperJava<D> {
     }
 
     fn skip_string(&mut self) -> Result<()> {
-        let len = self.get_string_len()? as i64;
-        self.skip_bytes(len)
+        let len = self.get_string_len()? as usize;
+        if len > crate::MAX_STRING_LENGTH {
+            return Err(Error::LargeLength(len));
+        }
+        self.skip_bytes(len as i64)
     }
 
     fn get_u8(&mut self) -> Result<u8> {
@@ -330,6 +346,9 @@ impl<'a, D: NbtDataSource<'a>> NbtReadHelper<'a> for NbtReadHelperJava<D> {
 
     fn get_string(&mut self) -> Result<Cow<'a, str>> {
         let len = self.get_string_len()? as usize;
+        if len > crate::MAX_STRING_LENGTH {
+            return Err(Error::LargeLength(len));
+        }
         self.reader.read_string(len)
     }
 
@@ -390,8 +409,11 @@ impl<'a, D: NbtDataSource<'a>> NbtReadHelper<'a> for NbtReadHelperBedrock<D> {
     }
 
     fn skip_string(&mut self) -> Result<()> {
-        let len = self.get_string_len()? as i64;
-        self.skip_bytes(len)
+        let len = self.get_string_len()? as usize;
+        if len > crate::MAX_STRING_LENGTH {
+            return Err(Error::LargeLength(len));
+        }
+        self.skip_bytes(len as i64)
     }
 
     fn get_u8(&mut self) -> Result<u8> {
@@ -424,6 +446,9 @@ impl<'a, D: NbtDataSource<'a>> NbtReadHelper<'a> for NbtReadHelperBedrock<D> {
 
     fn get_string(&mut self) -> Result<Cow<'a, str>> {
         let len = self.get_string_len()? as usize;
+        if len > crate::MAX_STRING_LENGTH {
+            return Err(Error::LargeLength(len));
+        }
         self.reader.read_string(len)
     }
 

@@ -62,8 +62,9 @@ impl TeleportTowardsPlayerGoal {
             .target_predicate
             .test(
                 &world,
-                Some(&self.enderman.mob_entity.living_entity),
+                Some(self.enderman.as_ref()),
                 living,
+                &self.enderman.mob_entity.sensing,
             )
             .await
         {

@@ -184,7 +184,7 @@ impl CommandBlock {
             if powered || auto {
                 let conditions_met = Self::conditions_met(&world, &pos, direction);
                 if conditions_met {
-                    let command = command_entity.command.lock().await;
+                    let command = command_entity.command().await;
                     let Some(entity) = world.get_block_entity(&pos) else {
                         warn!("Command block entity disappeared during execution");
                         break;
@@ -301,7 +301,7 @@ impl BlockBehaviour for CommandBlock {
                 &server,
                 args.world.clone(),
                 block_entity.clone(),
-                &command_entity.command.lock().await,
+                &command_entity.command().await,
             )
             .await;
 

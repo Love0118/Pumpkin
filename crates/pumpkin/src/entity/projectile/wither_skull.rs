@@ -81,10 +81,8 @@ impl WitherSkullEntity {
 }
 
 impl EntityBase for WitherSkullEntity {
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
-        Box::pin(async move {
-            nbt.put_bool("dangerous", self.is_dangerous());
-        })
+    fn write_custom_nbt(&self, nbt: &mut NbtCompound) {
+        nbt.put_bool("dangerous", self.is_dangerous());
     }
 
     fn read_custom_nbt<'a>(&'a self, nbt: &'a NbtCompound) -> NbtFuture<'a, ()> {

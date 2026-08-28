@@ -206,6 +206,18 @@ impl Scoreboard {
             .find(|team| team.players.iter().any(|p| p == entity_name))
     }
 
+    #[must_use]
+    pub fn are_allied(&self, first_entity_name: &str, second_entity_name: &str) -> bool {
+        if first_entity_name == second_entity_name {
+            return true;
+        }
+        let Some(first_team) = self.get_entity_team(first_entity_name) else {
+            return false;
+        };
+        self.get_entity_team(second_entity_name)
+            .is_some_and(|second_team| second_team.name == first_team.name)
+    }
+
     pub async fn add_objective(
         &mut self,
         target: &impl ScoreboardTarget,
@@ -840,6 +852,42 @@ pub struct Team {
     pub player_prefix: TextComponent,
     pub player_suffix: TextComponent,
     pub players: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use pumpkin_util::text::TextComponent;
+
+    use super::{CollisionRule, NameTagVisibility, Scoreboard, Team};
+
+    fn team(name: &str, players: &[&str]) -> Team {
+        Team {
+            name: name.to_string(),
+            display_name: TextComponent::text(name.to_string()),
+            options: 0,
+            nametag_visibility: NameTagVisibility::Always,
+            collision_rule: CollisionRule::Always,
+            color: pumpkin_util::text::color::NamedColor::White,
+            player_prefix: TextComponent::empty(),
+            player_suffix: TextComponent::empty(),
+            players: players.iter().map(|player| (*player).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn scoreboard_alliance_requires_the_same_team() {
+        let mut scoreboard = Scoreboard::new();
+        scoreboard
+            .teams
+            .insert("red".to_string(), team("red", &["a", "b"]));
+        scoreboard
+            .teams
+            .insert("blue".to_string(), team("blue", &["c"]));
+        assert!(scoreboard.are_allied("a", "a"));
+        assert!(scoreboard.are_allied("a", "b"));
+        assert!(!scoreboard.are_allied("a", "c"));
+        assert!(!scoreboard.are_allied("a", "missing"));
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

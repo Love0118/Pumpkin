@@ -26,16 +26,15 @@ use pumpkin_data::{Block, BlockStateId, block_properties::has_random_ticks, flui
 use pumpkin_util::math::{position::BlockPos, vector2::Vector2};
 use pumpkin_util::world_seed::Seed;
 use rustc_hash::FxHashSet;
+use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     thread,
 };
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace};
 // use tokio::runtime::Handle;
 use tokio::{
     select,
@@ -110,6 +109,7 @@ pub struct Level {
     pub autosave_ticks: u64,
 
     pending_entity_generations: Arc<DashMap<Vector2<i32>, Vec<oneshot::Sender<SyncEntityChunk>>>>,
+    save_waiters: Mutex<Vec<oneshot::Sender<Result<(), String>>>>,
 
     pub level_channel: Arc<LevelChannel>,
     pub thread_tracker: Mutex<Vec<thread::JoinHandle<()>>>,
@@ -136,6 +136,26 @@ pub struct LevelFolder {
     pub region_folder: PathBuf,
     pub entities_folder: PathBuf,
     pub poi_folder: PathBuf,
+}
+
+async fn complete_shutdown_durability<Terrain, ChunkBarrier, EntityBarrier, EntityWrite>(
+    terrain: Terrain,
+    chunk_barrier: ChunkBarrier,
+    entity_barrier: EntityBarrier,
+    entity_write: EntityWrite,
+) -> Result<(), String>
+where
+    Terrain: Future<Output = Result<(), String>>,
+    ChunkBarrier: Future<Output = ()>,
+    EntityBarrier: Future<Output = ()>,
+    EntityWrite: Future<Output = Result<(), String>>,
+{
+    let terrain_result = terrain.await;
+    chunk_barrier.await;
+    entity_barrier.await;
+    let entity_result = entity_write.await;
+    terrain_result?;
+    entity_result
 }
 
 impl Level {
@@ -278,6 +298,7 @@ impl Level {
             save_enabled: AtomicBool::new(true),
             autosave_ticks: level_config.autosave_ticks,
             pending_entity_generations,
+            save_waiters: Mutex::new(Vec::new()),
             level_channel: level_channel.clone(),
             thread_tracker,
             chunk_listener: listener.clone(),
@@ -321,12 +342,7 @@ impl Level {
         let level = self.clone();
         if let Some(pool) = &self.gen_pool {
             pool.spawn(move || {
-                let arc_chunk = Arc::new(ChunkEntityData {
-                    x: pos.x,
-                    z: pos.y,
-                    data: tokio::sync::Mutex::new(Vec::new()),
-                    dirty: AtomicBool::new(false),
-                });
+                let arc_chunk = Arc::new(ChunkEntityData::empty(pos));
 
                 level.loaded_entity_chunks.insert(pos, arc_chunk.clone());
 
@@ -342,12 +358,7 @@ impl Level {
             let _ = thread::Builder::new()
                 .name(format!("Entity Gen {pos:?}"))
                 .spawn(move || {
-                    let arc_chunk = Arc::new(ChunkEntityData {
-                        x: pos.x,
-                        z: pos.y,
-                        data: tokio::sync::Mutex::new(Vec::new()),
-                        dirty: AtomicBool::new(false),
-                    });
+                    let arc_chunk = Arc::new(ChunkEntityData::empty(pos));
 
                     level_clone
                         .loaded_entity_chunks
@@ -373,11 +384,66 @@ impl Level {
         self.tasks.spawn(task)
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn save_chunks_durable(&self) -> Result<(), String> {
+        if self.shut_down_chunk_system.load(Ordering::Acquire) {
+            return Err("chunk system is shutting down".to_owned());
+        }
+
+        let (sender, receiver) = oneshot::channel();
+        self.save_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(sender);
+        self.should_save.store(true, Ordering::Release);
+        self.level_channel.notify();
+
+        receiver
+            .await
+            .map_err(|_| "chunk save worker stopped before durable completion".to_owned())?
+    }
+
+    pub async fn save_entity_chunks_durable(&self) -> Result<(), String> {
+        if self.shut_down_chunk_system.load(Ordering::Acquire) {
+            return Err("chunk system is shutting down".to_owned());
+        }
+
+        let chunks = self
+            .loaded_entity_chunks
+            .iter()
+            .map(|chunk| (*chunk.key(), chunk.value().clone()))
+            .collect::<Vec<_>>();
+        self.entity_saver
+            .save_chunks(&self.level_folder, chunks, true)
+            .await
+            .map_err(|error| format!("failed to save entity chunks: {error}"))
+    }
+
+    pub fn loaded_entity_chunk_positions(&self) -> Vec<Vector2<i32>> {
+        self.loaded_entity_chunks
+            .iter()
+            .map(|chunk| *chunk.key())
+            .collect()
+    }
+
+    pub(crate) fn take_save_waiters(&self) -> Vec<oneshot::Sender<Result<(), String>>> {
+        let mut waiters = self
+            .save_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *waiters)
+    }
+
+    pub async fn shutdown(&self) -> Result<(), String> {
         let world_id = self.level_folder.root_folder.display();
         info!("Saving level ({})...", world_id);
+        let (completion, durable_result) = oneshot::channel();
+        self.save_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(completion);
+
+        self.shut_down_chunk_system.store(true, Ordering::Release);
         self.cancel_token.cancel();
-        self.shut_down_chunk_system.store(true, Ordering::Relaxed);
         self.level_channel.notify();
 
         self.tasks.close();
@@ -403,42 +469,59 @@ impl Level {
             failed_count
         });
 
-        match timeout(Duration::from_secs(3), join_task).await {
-            Ok(Ok(failed_count)) => {
-                if failed_count > 0 {
-                    warn!(
-                        "{} threads failed to join properly for {}.",
-                        failed_count, world_id
-                    );
-                }
-            }
-            Ok(Err(_)) => {
-                warn!("Thread join task panicked for {}.", world_id);
-            }
-            Err(_) => {
-                warn!("Timed out waiting for threads to join for {}.", world_id);
+        let join_error = match join_task.await {
+            Ok(0) => None,
+            Ok(failed_count) => Some(format!(
+                "{failed_count} chunk threads failed to join for {world_id}"
+            )),
+            Err(error) => Some(format!(
+                "chunk thread join task failed for {world_id}: {error}"
+            )),
+        };
+        if let Some(error) = &join_error {
+            for waiter in self.take_save_waiters() {
+                let _ = waiter.send(Err(error.clone()));
             }
         }
 
         self.tasks.wait().await;
         self.chunk_system_tasks.wait().await;
 
-        info!("Flushing chunk data to disk for {}...", world_id);
-        self.chunk_saver.block_and_await_ongoing_tasks().await;
-        info!("Flushing entity data to disk for {}...", world_id);
-        self.entity_saver.block_and_await_ongoing_tasks().await;
+        let durability_result = complete_shutdown_durability(
+            async {
+                durable_result.await.map_err(|_| {
+                    "chunk save worker stopped before shutdown completion".to_owned()
+                })?
+            },
+            async {
+                info!("Flushing chunk data to disk for {}...", world_id);
+                self.chunk_saver.block_and_await_ongoing_tasks().await;
+            },
+            async {
+                info!("Flushing entity data to disk for {}...", world_id);
+                self.entity_saver.block_and_await_ongoing_tasks().await;
+            },
+            async {
+                // Snapshot only after both format barriers have drained, so a
+                // mutation completed by the admitted task drain is included.
+                let chunks_to_write = self
+                    .loaded_entity_chunks
+                    .iter()
+                    .map(|chunk| (*chunk.key(), chunk.value().clone()))
+                    .collect::<Vec<_>>();
+                self.loaded_entity_chunks.clear();
 
-        // save all chunks currently in memory
-        let chunks_to_write = self
-            .loaded_entity_chunks
-            .iter()
-            .map(|chunk| (*chunk.key(), chunk.value().clone()))
-            .collect::<Vec<_>>();
-        self.loaded_entity_chunks.clear();
+                // TODO: I think the chunk_saver should be at the server level
+                self.entity_saver.clear_watched_chunks().await;
+                self.write_entity_chunks(chunks_to_write).await
+            },
+        )
+        .await;
 
-        // TODO: I think the chunk_saver should be at the server level
-        self.entity_saver.clear_watched_chunks().await;
-        self.write_entity_chunks(chunks_to_write).await;
+        if let Some(error) = join_error {
+            return Err(error);
+        }
+        durability_result
     }
 
     pub fn loaded_chunk_count(&self) -> usize {
@@ -529,7 +612,9 @@ impl Level {
         let level = self.clone();
         self.spawn_task(async move {
             debug!("Writing {} entity chunks to disk", chunks_to_process.len());
-            level.write_entity_chunks(chunks_to_process).await;
+            if let Err(error) = level.write_entity_chunks(chunks_to_process).await {
+                error!("Failed to write entity chunks: {error}");
+            }
         });
     }
 
@@ -803,14 +888,8 @@ impl Level {
                     self.spawn_entity_generation(pos);
                 }
             }
-            rx.await.unwrap_or_else(|_| {
-                Arc::new(ChunkEntityData {
-                    x: pos.x,
-                    z: pos.y,
-                    data: tokio::sync::Mutex::new(Vec::new()),
-                    dirty: AtomicBool::new(false),
-                })
-            })
+            rx.await
+                .unwrap_or_else(|_| Arc::new(ChunkEntityData::empty(pos)))
         }
     }
 
@@ -860,28 +939,29 @@ impl Level {
 
         trace!("Sending chunks to ChunkIO {:}", chunks_to_write.len());
         if let Err(error) = chunk_saver
-            .save_chunks(&level_folder, chunks_to_write)
+            .save_chunks(&level_folder, chunks_to_write, true)
             .await
         {
             error!("Failed writing Chunk to disk {error}");
         }
     }
 
-    pub async fn write_entity_chunks(&self, chunks_to_write: Vec<(Vector2<i32>, SyncEntityChunk)>) {
+    pub async fn write_entity_chunks(
+        &self,
+        chunks_to_write: Vec<(Vector2<i32>, SyncEntityChunk)>,
+    ) -> Result<(), String> {
         if chunks_to_write.is_empty() {
-            return;
+            return Ok(());
         }
 
         let chunk_saver = self.entity_saver.clone();
         let level_folder = self.level_folder.clone();
 
         trace!("Sending chunks to ChunkIO {:}", chunks_to_write.len());
-        if let Err(error) = chunk_saver
-            .save_chunks(&level_folder, chunks_to_write)
+        chunk_saver
+            .save_chunks(&level_folder, chunks_to_write, true)
             .await
-        {
-            error!("Failed writing Chunk to disk {error}");
-        }
+            .map_err(|error| format!("failed writing entity chunk to disk: {error}"))
     }
 
     pub fn is_chunk_loaded(&self, coordinates: &Vector2<i32>) -> bool {
@@ -1017,6 +1097,85 @@ mod tests {
     use super::*;
     use pumpkin_config::world::LevelConfig;
     use tempfile::TempDir;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_durability_waits_for_slow_stuck_and_latest_mutation() {
+        let terrain_started = Arc::new(tokio::sync::Notify::new());
+        let terrain_release = Arc::new(tokio::sync::Notify::new());
+        let serializer_started = Arc::new(tokio::sync::Notify::new());
+        let serializer_release = Arc::new(tokio::sync::Notify::new());
+        let entity_barrier_started = Arc::new(tokio::sync::Notify::new());
+        let entity_barrier_release = Arc::new(tokio::sync::Notify::new());
+        let generation = Arc::new(AtomicU64::new(1));
+        let persisted_generation = Arc::new(AtomicU64::new(0));
+
+        let mut shutdown = tokio::spawn(complete_shutdown_durability(
+            {
+                let started = terrain_started.clone();
+                let release = terrain_release.clone();
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(())
+                }
+            },
+            {
+                let started = serializer_started.clone();
+                let release = serializer_release.clone();
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                }
+            },
+            {
+                let started = entity_barrier_started.clone();
+                let release = entity_barrier_release.clone();
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                }
+            },
+            {
+                let generation = generation.clone();
+                let persisted_generation = persisted_generation.clone();
+                async move {
+                    persisted_generation
+                        .store(generation.load(Ordering::Acquire), Ordering::Release);
+                    Ok(())
+                }
+            },
+        ));
+
+        terrain_started.notified().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown returned before the slow terrain acknowledgement"
+        );
+        terrain_release.notify_one();
+
+        serializer_started.notified().await;
+        generation.store(2, Ordering::Release);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown returned while the serializer barrier was stuck"
+        );
+        serializer_release.notify_one();
+
+        entity_barrier_started.notified().await;
+        assert_eq!(persisted_generation.load(Ordering::Acquire), 0);
+        entity_barrier_release.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), shutdown)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted_generation.load(Ordering::Acquire), 2);
+    }
 
     #[tokio::test]
     async fn dimension_paths_26_2() {

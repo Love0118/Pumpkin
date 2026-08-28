@@ -1,5 +1,6 @@
 use std::io::{Error, Write};
 
+use bytes::Bytes;
 use pumpkin_macros::packet;
 
 use crate::{codec::var_uint::VarUInt, serial::PacketWrite};
@@ -7,7 +8,7 @@ use crate::{codec::var_uint::VarUInt, serial::PacketWrite};
 #[derive(Clone, Debug)]
 pub struct CacheBlob {
     pub hash: u64,
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
 }
 
 #[packet(136)]

@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU8, Ordering};
 
-use crate::entity::{Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity};
+use crate::entity::{
+    DamageContext, Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity,
+};
 use crossbeam::atomic::AtomicCell;
 use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::{
@@ -231,22 +233,20 @@ impl ArmorStandEntity {
 }
 
 impl EntityBase for ArmorStandEntity {
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
-        Box::pin(async {
-            let disabled_slots = self.disabled_slots.load(Ordering::Relaxed);
-            // ...
+    fn write_custom_nbt(&self, nbt: &mut NbtCompound) {
+        let disabled_slots = self.disabled_slots.load(Ordering::Relaxed);
+        // ...
 
-            nbt.put_bool("Invisible", self.is_invisible());
-            nbt.put_bool("Small", self.is_small());
-            nbt.put_bool("ShowArms", self.should_show_arms());
-            nbt.put_int("DisabledSlots", disabled_slots);
-            nbt.put_bool("NoBasePlate", !self.should_show_base_plate());
-            if self.is_marker() {
-                nbt.put_bool("Marker", true);
-            }
+        nbt.put_bool("Invisible", self.is_invisible());
+        nbt.put_bool("Small", self.is_small());
+        nbt.put_bool("ShowArms", self.should_show_arms());
+        nbt.put_int("DisabledSlots", disabled_slots);
+        nbt.put_bool("NoBasePlate", !self.should_show_base_plate());
+        if self.is_marker() {
+            nbt.put_bool("Marker", true);
+        }
 
-            nbt.put("Pose", self.pack_rotation());
-        })
+        nbt.put("Pose", self.pack_rotation());
     }
 
     fn read_custom_nbt<'a>(&'a self, nbt: &'a NbtCompound) -> NbtFuture<'a, ()> {
@@ -316,14 +316,13 @@ impl EntityBase for ArmorStandEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        caller: &'a dyn EntityBase,
-        _amount: f32,
-        damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        source: Option<&'a dyn EntityBase>,
-        cause: Option<&'a dyn EntityBase>,
+        target: &'a dyn EntityBase,
+        context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
+            let damage_type = context.damage_type();
+            let source = context.direct_entity();
+            let cause = context.causing_entity();
             let entity = self.get_entity();
             if entity.is_removed() {
                 return false;
@@ -345,7 +344,7 @@ impl EntityBase for ArmorStandEntity {
                 damage_type == DamageType::OUT_OF_WORLD || damage_type == DamageType::GENERIC_KILL;
 
             if bypasses_invulnerability {
-                entity.kill(caller).await;
+                entity.kill(target).await;
                 return false;
             }
 
@@ -363,7 +362,7 @@ impl EntityBase for ArmorStandEntity {
 
             if is_explosion {
                 Self::on_break(entity);
-                entity.kill(caller).await;
+                entity.kill(target).await;
                 return false;
             }
 
@@ -393,7 +392,7 @@ impl EntityBase for ArmorStandEntity {
                     return false;
                 } else if player.is_creative() {
                     Self::spawn_break_particles(entity);
-                    entity.kill(caller).await;
+                    entity.kill(target).await;
                     return true;
                 }
             }
@@ -416,7 +415,7 @@ impl EntityBase for ArmorStandEntity {
                     &entity.block_pos.load().to_f64(),
                 );
                 self.break_and_drop_items().await;
-                entity.kill(caller).await;
+                entity.kill(target).await;
             }
 
             true

@@ -5,7 +5,8 @@ use tokio::sync::RwLock;
 use crate::entity::projectile::ProjectileHit;
 use crate::{
     entity::{
-        Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity, player::Player,
+        DamageContext, Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity,
+        player::Player,
     },
     server::Server,
 };
@@ -120,7 +121,8 @@ impl ArrowEntity {
                 entity.entity_id,
                 Some(shooter.entity_id),
             );
-        if let Some(server) = entity.world.load().server.upgrade() {
+        let server = entity.world.load().server.upgrade();
+        if let Some(server) = server {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     server.plugin_manager.fire(&server, &mut launch_event).await;
@@ -273,7 +275,7 @@ impl ArrowEntity {
 }
 
 impl EntityBase for ArrowEntity {
-    fn write_custom_nbt<'a>(
+    fn write_custom_nbt_async<'a>(
         &'a self,
         nbt: &'a mut pumpkin_nbt::compound::NbtCompound,
     ) -> NbtFuture<'a, ()> {
@@ -462,7 +464,8 @@ impl EntityBase for ArrowEntity {
                     hit_pos,
                     hit_entity,
                 );
-            if let Some(server) = self.entity.world.load().server.upgrade() {
+            let server = self.entity.world.load().server.upgrade();
+            if let Some(server) = server {
                 server.plugin_manager.fire(&server, &mut hit_event).await;
             }
             if hit_event.cancelled {
@@ -533,16 +536,14 @@ impl EntityBase for ArrowEntity {
                         target.get_entity().set_on_fire_for_ticks(100);
                     }
 
-                    let damage_succeeded = target
-                        .damage_with_context(
-                            &*target,
-                            damage as f32,
-                            DamageType::ARROW,
-                            Some(hit_pos),
-                            None,
-                            Some(self),
-                        )
-                        .await;
+                    let mut context = DamageContext::new(damage as f32, DamageType::ARROW)
+                        .with_position(hit_pos)
+                        .with_direct_entity(self);
+                    let owner = self.owner_id.and_then(|id| world.get_entity_by_id(id));
+                    if let Some(owner) = owner.as_deref() {
+                        context = context.with_causing_entity(owner);
+                    }
+                    let damage_succeeded = target.damage_with_context(&*target, context).await;
 
                     if let Some(living) = target.get_living_entity() {
                         let punch = self.punch_level.load(Ordering::Relaxed);

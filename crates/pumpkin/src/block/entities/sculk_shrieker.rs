@@ -34,7 +34,8 @@ impl BlockEntity for SculkShriekerBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            nbt.put_int("warning_level", *self.warning_level.lock().await);
+            let warning_level = *self.warning_level.lock().await;
+            nbt.put_int("warning_level", warning_level);
         })
     }
 

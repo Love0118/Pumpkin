@@ -8,6 +8,38 @@ use crate::level::LevelFolder;
 
 pub mod file_manager;
 
+const DECOMPRESSION_RATIO_GRACE_BYTES: usize = 64 * 1024;
+const MAX_DECOMPRESSION_RATIO: usize = 512;
+
+const fn maximum_compressed_bytes(max_decompressed_bytes: usize) -> usize {
+    max_decompressed_bytes
+        .saturating_add(max_decompressed_bytes / 16)
+        .saturating_add(DECOMPRESSION_RATIO_GRACE_BYTES)
+}
+
+/// Returns the largest decompressed payload a decoder may produce for this
+/// compressed input. Small payloads receive a fixed grace window; larger inputs
+/// are bounded by both the absolute format cap and a compression-ratio cap.
+pub(crate) fn decompression_output_limit(
+    compressed_bytes: usize,
+    max_decompressed_bytes: usize,
+) -> std::io::Result<usize> {
+    let max_compressed_bytes = maximum_compressed_bytes(max_decompressed_bytes);
+    if compressed_bytes > max_compressed_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "compressed payload has {compressed_bytes} bytes, exceeding the {max_compressed_bytes} byte format limit"
+            ),
+        ));
+    }
+
+    Ok(max_decompressed_bytes.min(
+        DECOMPRESSION_RATIO_GRACE_BYTES
+            .max(compressed_bytes.saturating_mul(MAX_DECOMPRESSION_RATIO)),
+    ))
+}
+
 /// The result of loading a chunk data.
 ///
 /// It can be the data loaded successfully, the data not found or an error
@@ -36,6 +68,19 @@ impl<D: Send, E: error::Error> LoadedData<D, E> {
 pub trait Dirtiable {
     fn is_dirty(&self) -> bool;
     fn mark_dirty(&self, flag: bool);
+
+    /// Returns the mutation generation represented by the next save snapshot.
+    fn dirty_generation(&self) -> u64 {
+        u64::from(self.is_dirty())
+    }
+
+    /// Marks `generation` durable without clearing mutations that happened after
+    /// that snapshot was captured.
+    fn mark_persisted(&self, generation: u64) {
+        if self.dirty_generation() == generation {
+            self.mark_dirty(false);
+        }
+    }
 }
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -66,6 +111,7 @@ where
         &'a self,
         folder: &'a LevelFolder,
         chunks_data: Vec<(Vector2<i32>, Self::Data)>,
+        force_flush: bool,
     ) -> BoxFuture<'a, Result<(), ChunkWritingError>>; // Returns BoxFuture<Result>
 
     /// Tells the `ChunkIO` that these chunks are currently loaded in memory
@@ -94,6 +140,15 @@ where
 /// The `Data` type is the type of the data that will be updated or serialized/deserialized
 /// like `ChunkData` or `EntityData`
 pub trait ChunkSerializer: Send + Sync + Default + 'static {
+    /// Hard read-before-parse limit for a single region file.
+    const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
+    /// Conservative transient memory used by one region codec operation.
+    const PEAK_REGION_WORKING_BYTES: usize = 64 * 1024 * 1024;
+    /// Retained compressed payload growth estimated for each updated chunk.
+    const RETAINED_BYTES_PER_DIRTY_CHUNK: usize = 1024 * 1024;
+    /// Peak multiplier while raw file bytes and parsed data coexist.
+    const READ_FILE_MEMORY_MULTIPLIER: usize = 2;
+
     type Data: Send + Sync + Sized + Dirtiable;
     type WriteBackend;
 
@@ -103,6 +158,17 @@ pub trait ChunkSerializer: Send + Sync + Default + 'static {
     fn get_chunk_key(chunk: &Vector2<i32>) -> String;
 
     fn should_write(&self, is_watched: bool) -> bool;
+
+    #[must_use]
+    fn estimated_fetch_peak_bytes(_requested_chunks: usize) -> usize {
+        Self::PEAK_REGION_WORKING_BYTES
+    }
+
+    #[must_use]
+    fn estimated_write_peak_bytes(dirty_chunks: usize) -> usize {
+        Self::PEAK_REGION_WORKING_BYTES
+            .saturating_add(Self::RETAINED_BYTES_PER_DIRTY_CHUNK.saturating_mul(dirty_chunks))
+    }
 
     /// Serialize the data to bytes.
     fn write(
@@ -126,4 +192,30 @@ pub trait ChunkSerializer: Send + Sync + Default + 'static {
         chunks: Vec<Vector2<i32>>,
         stream: tokio::sync::mpsc::Sender<LoadedData<Self::Data, ChunkReadingError>>,
     ) -> impl Future<Output = ()> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DECOMPRESSION_RATIO_GRACE_BYTES, MAX_DECOMPRESSION_RATIO, decompression_output_limit,
+        maximum_compressed_bytes,
+    };
+
+    #[test]
+    fn decompression_envelope_accepts_boundary_and_rejects_hostile_sizes() {
+        let maximum = 64 * 1024 * 1024;
+        let boundary_compressed = maximum / MAX_DECOMPRESSION_RATIO;
+        assert_eq!(
+            decompression_output_limit(boundary_compressed, maximum).unwrap(),
+            maximum
+        );
+        assert_eq!(
+            decompression_output_limit(1, maximum).unwrap(),
+            DECOMPRESSION_RATIO_GRACE_BYTES
+        );
+        assert!(
+            decompression_output_limit(maximum_compressed_bytes(maximum) + 1, maximum).is_err()
+        );
+        assert!(decompression_output_limit(boundary_compressed - 1, maximum).unwrap() < maximum);
+    }
 }

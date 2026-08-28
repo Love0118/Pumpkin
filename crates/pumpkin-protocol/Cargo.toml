@@ -39,6 +39,11 @@ xxhash-rust.workspace = true
 
 [dev-dependencies]
 # Validate correctness
+criterion.workspace = true
+
+[[bench]]
+name = "entity_metadata"
+harness = false
 
 [lints]
 workspace = true

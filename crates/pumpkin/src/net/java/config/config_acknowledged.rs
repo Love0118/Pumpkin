@@ -19,7 +19,9 @@ impl JavaClient {
     }
 }
 
-pub(crate) fn build_dimension_nbt(dim: &pumpkin_data::dimension::Dimension) -> Vec<u8> {
+pub(crate) fn build_dimension_nbt(
+    dim: &pumpkin_data::dimension::Dimension,
+) -> Result<Vec<u8>, pumpkin_nbt::Error> {
     let mut compound = pumpkin_nbt::compound::NbtCompound::new();
     compound.put_float("ambient_light", dim.ambient_light);
     compound.put_int("height", dim.height);
@@ -49,5 +51,7 @@ pub(crate) fn build_dimension_nbt(dim: &pumpkin_data::dimension::Dimension) -> V
     monster_spawn.put_compound("value", value);
     compound.put_compound("monster_spawn_light_level", monster_spawn);
 
-    pumpkin_nbt::Nbt::from(compound).write().to_vec()
+    pumpkin_nbt::Nbt::from(compound)
+        .write()
+        .map(|bytes| bytes.to_vec())
 }

@@ -31,7 +31,7 @@ impl DataComponentImpl for WritableBookContentImpl {
         let pages_tags: Vec<NbtTag> = self
             .pages
             .iter()
-            .map(|p| NbtTag::String(p.clone().into_boxed_str()))
+            .map(|p| NbtTag::String(p.clone().into()))
             .collect();
         compound.put("pages", NbtTag::List(pages_tags));
         NbtTag::Compound(compound)
@@ -80,7 +80,7 @@ impl DataComponentImpl for WrittenBookContentImpl {
         let pages_tags: Vec<NbtTag> = self
             .pages
             .iter()
-            .map(|p| NbtTag::String(p.clone().into_boxed_str()))
+            .map(|p| NbtTag::String(p.clone().into()))
             .collect();
         compound.put("pages", NbtTag::List(pages_tags));
         NbtTag::Compound(compound)

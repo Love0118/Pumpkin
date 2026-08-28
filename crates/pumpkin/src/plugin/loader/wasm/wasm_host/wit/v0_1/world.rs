@@ -1240,7 +1240,9 @@ impl pumpkin::plugin::world::HostWorld for PluginHostState {
         let mut nbt = pumpkin_nbt::NbtCompound::new();
         entity.write_internal(&mut nbt).await;
 
-        let bytes = pumpkin_nbt::Nbt::from(nbt).write_unnamed();
+        let bytes = pumpkin_nbt::Nbt::from(nbt)
+            .write_unnamed()
+            .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
         Ok(Some(bytes.to_vec()))
     }
 
@@ -1309,8 +1311,7 @@ impl pumpkin::plugin::world::HostWorld for PluginHostState {
 
     async fn save(&mut self, world: Resource<World>) -> wasmtime::Result<Result<(), String>> {
         let world_res = self.get_world_res(&world)?;
-        world_res.provider.save().await;
-        Ok(Ok(()))
+        Ok(world_res.provider.save().await)
     }
 
     async fn set_custom_data(

@@ -31,7 +31,7 @@ use crate::entity::combat::knockback_after_resistance;
 use crate::entity::mob::equipment::DEFAULT_EQUIPMENT_DROP_CHANCE;
 use crate::entity::mob::slime::SlimeEntity;
 use crate::entity::player::statistics::{CustomStatistic, StatisticCategory};
-use crate::entity::{EntityBaseFuture, NBTStorage, NbtFuture};
+use crate::entity::{DamageContext, EntityBaseFuture, NBTStorage, NbtFuture};
 use crate::server::Server;
 use crate::world::loot::{LootContextParameters, LootTableExt};
 use crossbeam::atomic::AtomicCell;
@@ -77,6 +77,10 @@ pub struct LivingEntity {
     pub hurt_cooldown: AtomicI32,
     /// Stores the amount of damage the entity last received.
     pub last_damage_taken: AtomicCell<f32>,
+    /// Damage type from the last successful hurt, retained for vanilla's 40-tick source window.
+    pub last_damage_type: AtomicCell<Option<DamageType>>,
+    /// Entity age when `last_damage_type` was recorded.
+    pub last_damage_time: AtomicI32,
     /// The current health level of the entity.
     pub health: AtomicCell<f32>,
     /// The current absorption (yellow hearts) on the entity.
@@ -124,6 +128,31 @@ pub struct LivingEntity {
 struct EffectParticle {
     particle_id: VarInt,
     color: i32,
+}
+
+fn damage_equipment_slot(
+    equipment: &mut EntityEquipment,
+    slot: &EquipmentSlot,
+    amount: i32,
+) -> Option<(DamageResult, ItemStack)> {
+    let stack = equipment.equipment.get_mut(slot)?;
+    if stack.is_empty()
+        || stack
+            .get_data_component::<EquippableImpl>()
+            .is_some_and(|equippable| !equippable.damage_on_hurt)
+    {
+        return None;
+    }
+
+    let result = stack.damage_item(amount);
+    (result != DamageResult::Untouched).then(|| (result, stack.clone()))
+}
+
+const fn equipment_slot_for_hand(hand: Hand) -> EquipmentSlot {
+    match hand {
+        Hand::Right => EquipmentSlot::MAIN_HAND,
+        Hand::Left => EquipmentSlot::OFF_HAND,
+    }
 }
 
 struct EffectParticles(Vec<EffectParticle>);
@@ -198,6 +227,8 @@ impl LivingEntity {
             entity,
             hurt_cooldown: AtomicI32::new(0),
             last_damage_taken: AtomicCell::new(0.0),
+            last_damage_type: AtomicCell::new(None),
+            last_damage_time: AtomicI32::new(i32::MIN),
             absorption: AtomicCell::new(0.0),
             fall_distance: AtomicCell::new(0.0),
             death_time: AtomicU8::new(0),
@@ -283,7 +314,8 @@ impl LivingEntity {
                 item.entity_type.id.to_string(),
                 stack_amount as u8,
             );
-        if let Some(server) = self.entity.world.load().server.upgrade() {
+        let server = self.entity.world.load().server.upgrade();
+        if let Some(server) = server {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     server.plugin_manager.fire(&server, &mut pickup_event).await;
@@ -401,7 +433,8 @@ impl LivingEntity {
                 self.entity.entity_id,
                 additional_health,
             );
-        if let Some(server) = self.entity.world.load().server.upgrade() {
+        let server = self.entity.world.load().server.upgrade();
+        if let Some(server) = server {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     server.plugin_manager.fire(&server, &mut event).await;
@@ -597,7 +630,8 @@ impl LivingEntity {
                 effect.duration,
                 effect.amplifier,
             );
-        if let Some(server) = self.entity.world.load().server.upgrade() {
+        let server = self.entity.world.load().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut effect_event).await;
         }
         if effect_event.cancelled {
@@ -1836,7 +1870,8 @@ impl LivingEntity {
                     crate::plugin::api::events::entity::entity_resurrect::EntityResurrectEvent::new(
                         self.entity.entity_id,
                     );
-                if let Some(server) = self.entity.world.load().server.upgrade() {
+                let server = self.entity.world.load().server.upgrade();
+                if let Some(server) = server {
                     server
                         .plugin_manager
                         .fire(&server, &mut resurrect_event)
@@ -1847,10 +1882,7 @@ impl LivingEntity {
                 }
 
                 stack.clear();
-                let slot = match hand {
-                    Hand::Right => EquipmentSlot::MAIN_HAND,
-                    Hand::Left => EquipmentSlot::OFF_HAND,
-                };
+                let slot = equipment_slot_for_hand(hand);
                 if let Some(player) = caller.get_player() {
                     player
                         .inventory()
@@ -1915,56 +1947,38 @@ impl LivingEntity {
     async fn damage_armor_items(&self, caller: &dyn EntityBase, damage_amount: f32) {
         // Formula: armor loses floor(incoming_damage / 4) durability, minimum 1.
         let armor_damage = (damage_amount / 4.0).floor().max(1.0) as i32;
-        let mut equipment_updates = Vec::new();
-
         // TODO: Falling anvil/stalactite should only damage the helmet slot.
         // TODO: Implement DAMAGE_RESISTANT component checks (e.g. netherite vs fire).
 
-        let armor_slots: Vec<(usize, ItemStack, EquipmentSlot)> = {
-            let equipment_lock = self.entity_equipment.lock().await;
+        let damaged_slots = {
+            let mut equipment = self.entity_equipment.lock().await;
             self.equipment_slots
                 .iter()
                 .filter(|(_, slot)| slot.is_armor_slot())
-                .filter_map(|(index, slot)| {
-                    equipment_lock
-                        .equipment
-                        .get(slot)
-                        .cloned()
-                        .map(|stack| (*index, stack, slot.clone()))
+                .filter_map(|(slot_index, slot)| {
+                    damage_equipment_slot(&mut equipment, slot, armor_damage)
+                        .map(|(result, stack)| (*slot_index, slot.clone(), result, stack))
                 })
-                .collect()
+                .collect::<Vec<_>>()
         };
 
-        for (slot_index, mut stack, slot) in armor_slots {
-            if stack.is_empty() {
-                continue;
+        let mut equipment_updates = Vec::with_capacity(damaged_slots.len());
+        for (slot_index, slot, result, stack) in damaged_slots {
+            if result == DamageResult::Broken {
+                self.entity.world.load().send_entity_status(
+                    &self.entity,
+                    super::equipment_break_status(&slot),
+                    None,
+                );
             }
-
-            let takes_damage = stack
-                .get_data_component::<EquippableImpl>()
-                .is_none_or(|equippable| equippable.damage_on_hurt);
-
-            if takes_damage {
-                let slot_result = stack.damage_item(armor_damage);
-                if slot_result != pumpkin_data::item_stack::DamageResult::Untouched {
-                    if slot_result == pumpkin_data::item_stack::DamageResult::Broken {
-                        let world = self.entity.world.load();
-                        world.send_entity_status(
-                            &self.entity,
-                            super::equipment_break_status(&slot),
-                            None,
-                        );
-                    }
-                    equipment_updates.push((slot.clone(), stack.clone()));
-                    if let Some(player) = caller.get_player() {
-                        player
-                            .enqueue_slot_set_packet(&CSetPlayerInventory::new(
-                                (slot_index as i32).into(),
-                                &ItemStackSerializer::from(stack),
-                            ))
-                            .await;
-                    }
-                }
+            equipment_updates.push((slot.clone(), stack.clone()));
+            if let Some(player) = caller.get_player() {
+                player
+                    .enqueue_slot_set_packet(&CSetPlayerInventory::new(
+                        (slot_index as i32).into(),
+                        &ItemStackSerializer::from(stack),
+                    ))
+                    .await;
             }
         }
 
@@ -2172,15 +2186,15 @@ impl EntityBase for LivingEntity {
     #[allow(clippy::too_many_lines)]
     fn damage_with_context<'a>(
         &'a self,
-        caller: &'a dyn EntityBase,
-        amount: f32,
-        damage_type: DamageType,
-        position: Option<Vector3<f64>>,
-        source: Option<&'a dyn EntityBase>,
-        cause: Option<&'a dyn EntityBase>,
+        target: &'a dyn EntityBase,
+        context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
-            let mut amount = amount;
+            let mut amount = context.amount();
+            let damage_type = context.damage_type();
+            let position = context.position();
+            let source = context.direct_entity();
+            let cause = context.causing_entity();
 
             // Check invulnerability before applying damage
             if self.entity.is_invulnerable_to(&damage_type).await {
@@ -2201,7 +2215,8 @@ impl EntityBase for LivingEntity {
                     damage_type,
                     amount,
                 );
-            if let Some(server) = self.entity.world.load().server.upgrade() {
+            let server = self.entity.world.load().server.upgrade();
+            if let Some(server) = server {
                 server.plugin_manager.fire(&server, &mut damage_event).await;
             }
             if damage_event.cancelled {
@@ -2352,7 +2367,7 @@ impl EntityBase for LivingEntity {
 
             if resistance_reduction > 0.0 {
                 let resisted = damage_after_enchantments * resistance_reduction;
-                if let Some(player) = caller.get_player() {
+                if let Some(player) = target.get_player() {
                     player
                         .increment_stat(
                             StatisticCategory::Custom,
@@ -2385,7 +2400,7 @@ impl EntityBase for LivingEntity {
                 if source_to_player.dot(&look_vec) < 0.0 {
                     world.play_sound(Sound::ItemShieldBlock, SoundCategory::Players, &player_pos);
 
-                    if let Some(player) = caller.get_player() {
+                    if let Some(player) = target.get_player() {
                         player
                             .increment_stat(
                                 StatisticCategory::Custom,
@@ -2412,7 +2427,7 @@ impl EntityBase for LivingEntity {
                             }
 
                             if rand::random::<f32>() < disable_chance
-                                && let Some(victim_player) = caller.get_player()
+                                && let Some(victim_player) = target.get_player()
                             {
                                 victim_player
                                     .start_cooldown("minecraft:shield".to_string(), 100)
@@ -2427,23 +2442,27 @@ impl EntityBase for LivingEntity {
                         }
                     }
 
-                    let active_hand = self.active_hand.lock().await;
-                    if let Some(hand) = *active_hand {
-                        let slot = if hand == Hand::Left {
-                            EquipmentSlot::MAIN_HAND
-                        } else {
-                            EquipmentSlot::OFF_HAND
+                    let active_hand = *self.active_hand.lock().await;
+                    if let Some(hand) = active_hand {
+                        let slot = equipment_slot_for_hand(hand);
+                        let durability_damage = amount.floor().max(1.0) as i32;
+                        let damaged = {
+                            let mut equipment = self.entity_equipment.lock().await;
+                            let broken_item_id =
+                                equipment.equipment.get(&slot).map(|stack| stack.item.id);
+                            damage_equipment_slot(&mut equipment, &slot, durability_damage)
+                                .map(|(result, stack)| (result, stack, broken_item_id))
                         };
 
-                        let mut equipment_guard = self.entity_equipment.lock().await;
-                        if let Some(stack) = equipment_guard.equipment.get_mut(&slot) {
-                            let durability_damage = (amount / 1.0).floor().max(1.0) as i32;
-                            if stack.damage_item(durability_damage) == DamageResult::Broken {
-                                if let Some(player) = caller.get_player() {
+                        if let Some((result, stack, broken_item_id)) = damaged {
+                            if result == DamageResult::Broken {
+                                if let Some(player) = target.get_player()
+                                    && let Some(item_id) = broken_item_id
+                                {
                                     player
                                         .increment_stat(
                                             StatisticCategory::Broken,
-                                            stack.item.id as i32,
+                                            item_id as i32,
                                             1,
                                         )
                                         .await;
@@ -2453,13 +2472,9 @@ impl EntityBase for LivingEntity {
                                     crate::entity::equipment_break_status(&slot),
                                     None,
                                 );
-                                *stack = ItemStack::EMPTY.clone();
-                                let broken_stack = stack.clone();
-                                drop(equipment_guard);
-
-                                self.send_equipment_changes(&[(slot, broken_stack)]);
                                 self.clear_active_hand().await;
                             }
+                            self.send_equipment_changes(&[(slot, stack)]);
                         }
                     }
 
@@ -2488,6 +2503,10 @@ impl EntityBase for LivingEntity {
                 return false;
             };
             let config = &server.advanced_config.pvp;
+
+            self.last_damage_type.store(Some(damage_type));
+            self.last_damage_time
+                .store(self.entity.age.load(Relaxed), Relaxed);
 
             if config.hurt_animation {
                 let entity_id = self.entity.entity_id;
@@ -2563,7 +2582,7 @@ impl EntityBase for LivingEntity {
             let current_abs = self.absorption.load();
             if current_abs > 0.0 {
                 let absorbed = current_abs.min(remaining);
-                if let Some(player) = caller.get_player() {
+                if let Some(player) = target.get_player() {
                     player
                         .increment_stat(
                             StatisticCategory::Custom,
@@ -2609,7 +2628,7 @@ impl EntityBase for LivingEntity {
                 self.set_health(clamped_health);
 
                 // Statistics updates
-                if let Some(player) = caller.get_player() {
+                if let Some(player) = target.get_player() {
                     player
                         .increment_stat(
                             StatisticCategory::Custom,
@@ -2640,7 +2659,7 @@ impl EntityBase for LivingEntity {
 
             // Check if the entity died and isn't protected by a death protection mechanic (ex. totem of undying)
             if clamped_health <= 0.0
-                && (bypasses_cooldown_protection || !self.try_use_death_protector(caller).await)
+                && (bypasses_cooldown_protection || !self.try_use_death_protector(target).await)
             {
                 let mut death_event =
                     crate::plugin::api::events::entity::entity_death::EntityDeathEvent::new(
@@ -2650,7 +2669,7 @@ impl EntityBase for LivingEntity {
                 if let Some(server) = world.server.upgrade() {
                     server.plugin_manager.fire(&server, &mut death_event).await;
                 }
-                if let Some(player) = caller.get_player()
+                if let Some(player) = target.get_player()
                     && let Some(player_arc) = world.get_player_by_uuid(player.gameprofile.id)
                 {
                     let mut player_death_event =
@@ -2674,7 +2693,7 @@ impl EntityBase for LivingEntity {
             // Armor loses floor(raw_damage / 4) durability, minimum 1.
             // Not applied when the source is in `#minecraft:bypasses_armor`.
             if damage_amount > 0.0 && !bypasses_armor_durability(&damage_type) {
-                self.damage_armor_items(caller, damage_amount).await;
+                self.damage_armor_items(target, damage_amount).await;
             }
 
             true
@@ -3209,5 +3228,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(bytes, [10, 17, 1, 28, 0xff, 0xcd, 0x5c, 0xab]);
+    }
+
+    #[test]
+    fn armor_damage_is_written_back_to_the_authoritative_equipment_slot() {
+        use pumpkin_data::item::Item;
+
+        let mut equipment = EntityEquipment::new();
+        equipment.put(&EquipmentSlot::HEAD, ItemStack::new(1, &Item::IRON_HELMET));
+
+        let (result, updated) =
+            damage_equipment_slot(&mut equipment, &EquipmentSlot::HEAD, 1).unwrap();
+        assert_eq!(result, DamageResult::Damaged);
+        assert_eq!(updated.get_damage(), 1);
+        assert_eq!(equipment.get(&EquipmentSlot::HEAD).get_damage(), 1);
+
+        let mut almost_broken = equipment.get(&EquipmentSlot::HEAD);
+        almost_broken.set_damage(almost_broken.get_max_damage().unwrap() - 1);
+        equipment.put(&EquipmentSlot::HEAD, almost_broken);
+        let (result, updated) =
+            damage_equipment_slot(&mut equipment, &EquipmentSlot::HEAD, 1).unwrap();
+        assert_eq!(result, DamageResult::Broken);
+        assert!(updated.is_empty());
+        assert!(equipment.get(&EquipmentSlot::HEAD).is_empty());
+    }
+
+    #[test]
+    fn active_hand_maps_to_the_matching_equipment_slot() {
+        assert!(equipment_slot_for_hand(Hand::Right) == EquipmentSlot::MAIN_HAND);
+        assert!(equipment_slot_for_hand(Hand::Left) == EquipmentSlot::OFF_HAND);
     }
 }

@@ -3,17 +3,21 @@ use std::{
     pin::Pin,
     str::FromStr,
     sync::{
-        RwLock,
+        Arc, LazyLock, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Instant,
 };
 
 use bytes::Bytes;
-use pumpkin_data::{Block, BlockStateId, chunk::ChunkStatus, fluid::Fluid};
-use pumpkin_nbt::compound::NbtCompound;
+use pumpkin_data::{Block, BlockId, BlockStateId, biome::Biome, chunk::ChunkStatus, fluid::Fluid};
+use pumpkin_nbt::{
+    COMPOUND_ID, END_ID,
+    compound::NbtCompound,
+    serializer::{NbtWriteHelper, NbtWriteHelperJava},
+};
 use pumpkin_util::resource_location::{FromResourceLocation, ResourceLocation, ToResourceLocation};
 use rustc_hash::FxHashMap;
-use tokio::sync::Mutex;
 
 use crate::{
     chunk::{
@@ -23,6 +27,7 @@ use crate::{
     },
     generation::section_coords,
     level::LevelFolder,
+    serialization_metrics::{self, SerializationStage},
     tick::{ScheduledTick, TickPriority, scheduler::ChunkTickScheduler},
 };
 use pumpkin_util::math::position::BlockPos;
@@ -36,6 +41,116 @@ pub mod anvil;
 pub mod linear;
 pub mod pump;
 
+const MAX_CHUNK_RESIDUAL_NBT_ENTRIES: usize = 512;
+const MAX_CHUNK_RESIDUAL_NBT_BYTES: usize = 2 * 1024 * 1024;
+const CHUNK_AUTHORITATIVE_ROOT_KEYS: &[&str] = &[
+    "DataVersion",
+    "xPos",
+    "zPos",
+    "yPos",
+    "Status",
+    "Heightmaps",
+    "sections",
+    "block_ticks",
+    "fluid_ticks",
+    "block_entities",
+    "isLightOn",
+    "InhabitedTime",
+    "PumpkinCustomData",
+    "BukkitValues",
+];
+const MAX_ENTITY_CHUNK_RESIDUAL_NBT_ENTRIES: usize = 256;
+const MAX_ENTITY_CHUNK_RESIDUAL_NBT_BYTES: usize = 1024 * 1024;
+const ENTITY_CHUNK_AUTHORITATIVE_ROOT_KEYS: &[&str] = &[
+    "DataVersion",
+    "Position",
+    "Position-X",
+    "Position-Z",
+    "Entities",
+];
+
+type SharedBlockProperty = (Arc<str>, Arc<str>);
+type SharedBlockProperties = Box<[SharedBlockProperty]>;
+
+struct SharedPaletteStrings {
+    block_names: Box<[Arc<str>]>,
+    block_properties: Box<[SharedBlockProperties]>,
+    biome_names: Box<[Arc<str>]>,
+}
+
+static SHARED_PALETTE_STRINGS: LazyLock<SharedPaletteStrings> = LazyLock::new(|| {
+    fn namespaced(name: &'static str) -> Arc<str> {
+        if name.starts_with("minecraft:") {
+            Arc::from(name)
+        } else {
+            Arc::from(format!("minecraft:{name}"))
+        }
+    }
+
+    fn intern(strings: &mut FxHashMap<&'static str, Arc<str>>, value: &'static str) -> Arc<str> {
+        strings
+            .entry(value)
+            .or_insert_with(|| Arc::from(value))
+            .clone()
+    }
+
+    let block_names = (0..BlockId::COUNT)
+        .map(|raw_id| {
+            let id = BlockId::new_or_air(raw_id);
+            namespaced(Block::from_id(id).name)
+        })
+        .collect();
+
+    let mut property_strings = FxHashMap::default();
+    let block_properties = (0..BlockStateId::COUNT)
+        .map(|raw_id| {
+            let id = BlockStateId::new_or_air(raw_id);
+            Block::from_state_id(id)
+                .properties(id)
+                .map(|properties| {
+                    properties
+                        .to_props()
+                        .into_iter()
+                        .map(|(name, value)| {
+                            (
+                                intern(&mut property_strings, name),
+                                intern(&mut property_strings, value),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+
+    let plains = namespaced(Biome::PLAINS.registry_id);
+    let mut biome_names = vec![plains; usize::from(u8::MAX) + 1];
+    for biome in Biome::ALL {
+        biome_names[usize::from(biome.id)] = namespaced(biome.registry_id);
+    }
+
+    SharedPaletteStrings {
+        block_names,
+        block_properties,
+        biome_names: biome_names.into_boxed_slice(),
+    }
+});
+
+#[inline]
+fn shared_block_name(id: BlockStateId) -> Arc<str> {
+    SHARED_PALETTE_STRINGS.block_names[usize::from(id.to_block_id().as_u16())].clone()
+}
+
+#[inline]
+fn shared_block_properties(id: BlockStateId) -> &'static [(Arc<str>, Arc<str>)] {
+    &SHARED_PALETTE_STRINGS.block_properties[usize::from(id.as_u16())]
+}
+
+#[inline]
+fn shared_biome_name(id: u8) -> Arc<str> {
+    SHARED_PALETTE_STRINGS.biome_names[usize::from(id)].clone()
+}
+
 impl SingleChunkDataSerializer for ChunkData {
     #[inline]
     fn from_bytes(bytes: &Bytes, pos: Vector2<i32>) -> Result<Self, ChunkReadingError> {
@@ -46,7 +161,7 @@ impl SingleChunkDataSerializer for ChunkData {
     fn to_bytes(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Bytes, ChunkSerializingError>> + Send + '_>> {
-        Box::pin(async move { Ok(self.internal_to_bytes()) })
+        Box::pin(async move { self.internal_to_bytes() })
     }
 
     #[inline]
@@ -71,6 +186,14 @@ impl Dirtiable for ChunkData {
     #[inline]
     fn is_dirty(&self) -> bool {
         self.dirty.load(Ordering::Relaxed)
+    }
+
+    fn dirty_generation(&self) -> u64 {
+        self.dirty.generation()
+    }
+
+    fn mark_persisted(&self, generation: u64) {
+        self.dirty.mark_persisted(generation);
     }
 }
 
@@ -186,7 +309,12 @@ impl ChunkData {
         }
         .map_err(|e| ChunkParsingError::ErrorDeserializingChunk(e.to_string()))?;
 
-        let root_tag = nbt.root_tag;
+        let mut root_tag = nbt.root_tag;
+        crate::world_info::schema::migrate_persistent_root(
+            crate::world_info::schema::PersistentRootSchema::TerrainChunk,
+            &mut root_tag,
+        )
+        .map_err(|error| ChunkParsingError::ErrorDeserializingChunk(error.to_string()))?;
 
         let x_pos = root_tag.get_int("xPos").ok_or_else(|| {
             ChunkParsingError::ErrorDeserializingChunk("Missing xPos".to_string())
@@ -392,6 +520,20 @@ impl ChunkData {
             .or_else(|| root_tag.get_compound("BukkitValues"))
             .cloned()
             .unwrap_or_default();
+        let residual_nbt = crate::persistence::bounded_residual_nbt(
+            &root_tag,
+            CHUNK_AUTHORITATIVE_ROOT_KEYS.iter().copied(),
+            MAX_CHUNK_RESIDUAL_NBT_ENTRIES,
+            MAX_CHUNK_RESIDUAL_NBT_BYTES,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                "discarding residual NBT for chunk {},{}: {error}",
+                position.x,
+                position.y
+            );
+            NbtCompound::new()
+        });
 
         Ok(Self {
             section,
@@ -399,7 +541,7 @@ impl ChunkData {
             x: position.x,
             z: position.y,
             // This chunk is read from disk, so it has not been modified
-            dirty: AtomicBool::new(false),
+            dirty: crate::chunk::DirtyState::new(false),
             block_ticks: ChunkTickScheduler::from_iter(block_ticks),
             fluid_ticks: ChunkTickScheduler::from_iter(fluid_ticks),
             pending_block_entities: std::sync::Mutex::new(block_entities),
@@ -409,11 +551,12 @@ impl ChunkData {
             blending_data: None,
             inhabited_time: AtomicU64::new(root_tag.get_long("InhabitedTime").unwrap_or(0) as u64),
             custom_data: std::sync::Mutex::new(custom_data),
+            residual_nbt: std::sync::Mutex::new(residual_nbt),
         })
     }
 
     #[allow(clippy::too_many_lines)]
-    fn internal_to_bytes(&self) -> Bytes {
+    fn internal_to_bytes(&self) -> Result<Bytes, ChunkSerializingError> {
         use pumpkin_nbt::tag::NbtTag;
 
         fn extract_light_ref(light: Option<&LightContainer>) -> Option<&[u8]> {
@@ -423,6 +566,7 @@ impl ChunkData {
             }
         }
 
+        let snapshot_started = Instant::now();
         let is_light_correct = self
             .light_populated
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -435,28 +579,51 @@ impl ChunkData {
             entities_guard.values().cloned().collect::<Vec<_>>()
         };
 
-        let light_lock = self
+        let light = self
             .light_engine
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let heightmap_lock = self
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let heightmaps = self
             .heightmap
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let block_lock = self
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let block_sections = self
             .section
             .block_sections
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let biome_lock = self
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(BlockPalette::to_disk_nbt)
+            .collect::<Vec<_>>();
+        let biome_sections = self
             .section
             .biome_sections
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(BiomePalette::to_disk_nbt)
+            .collect::<Vec<_>>();
+        let custom_data = self
+            .custom_data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let residual_nbt = self
+            .residual_nbt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        serialization_metrics::record_duration(
+            SerializationStage::Snapshot,
+            snapshot_started.elapsed(),
+        );
 
+        let encode_started = Instant::now();
         let min_section_y = (self.section.min_y >> 4) as i8;
 
-        let mut root_compound = NbtCompound::new();
+        let mut root_compound = residual_nbt;
         root_compound.put_int("DataVersion", WORLD_DATA_VERSION);
         root_compound.put_int("xPos", self.x);
         root_compound.put_int("zPos", self.z);
@@ -479,13 +646,13 @@ impl ChunkData {
         root_compound.put_string("Status", status_str.to_string());
 
         let mut heightmaps_compound = NbtCompound::new();
-        if let Some(ref arr) = heightmap_lock.world_surface {
+        if let Some(ref arr) = heightmaps.world_surface {
             heightmaps_compound.put("WORLD_SURFACE", NbtTag::LongArray(arr.to_vec()));
         }
-        if let Some(ref arr) = heightmap_lock.motion_blocking {
+        if let Some(ref arr) = heightmaps.motion_blocking {
             heightmaps_compound.put("MOTION_BLOCKING", NbtTag::LongArray(arr.to_vec()));
         }
-        if let Some(ref arr) = heightmap_lock.motion_blocking_no_leaves {
+        if let Some(ref arr) = heightmaps.motion_blocking_no_leaves {
             heightmaps_compound.put("MOTION_BLOCKING_NO_LEAVES", NbtTag::LongArray(arr.to_vec()));
         }
         root_compound.put_compound("Heightmaps", heightmaps_compound);
@@ -497,7 +664,7 @@ impl ChunkData {
             section_comp.put_byte("Y", y_val);
 
             // block_states
-            let block_states_nbt = block_lock[i].to_disk_nbt();
+            let block_states_nbt = &block_sections[i];
             let mut bs_comp = NbtCompound::new();
             if let Some(ref data_arr) = block_states_nbt.data {
                 bs_comp.put("data", NbtTag::LongArray(data_arr.to_vec()));
@@ -506,23 +673,15 @@ impl ChunkData {
                 .palette
                 .iter()
                 .map(|&id| {
-                    let block = Block::from_state_id(id);
                     let mut comp = NbtCompound::new();
-                    let name = if block.name.starts_with("minecraft:") {
-                        block.name.to_string()
-                    } else {
-                        format!("minecraft:{}", block.name)
-                    };
-                    comp.put_string("Name", name);
-                    if let Some(props) = block.properties(id) {
-                        let prop_vec = props.to_props();
-                        if !prop_vec.is_empty() {
-                            let mut props_comp = NbtCompound::new();
-                            for (k, v) in prop_vec {
-                                props_comp.put_string(k, v.to_string());
-                            }
-                            comp.put_compound("Properties", props_comp);
+                    comp.put_string("Name", shared_block_name(id));
+                    let properties = shared_block_properties(id);
+                    if !properties.is_empty() {
+                        let mut props_comp = NbtCompound::new();
+                        for (name, value) in properties {
+                            props_comp.put_string(name, Arc::clone(value));
                         }
+                        comp.put_compound("Properties", props_comp);
                     }
                     NbtTag::Compound(comp)
                 })
@@ -531,7 +690,7 @@ impl ChunkData {
             section_comp.put_compound("block_states", bs_comp);
 
             // biomes
-            let biomes_nbt = biome_lock[i].to_disk_nbt();
+            let biomes_nbt = &biome_sections[i];
             let mut b_comp = NbtCompound::new();
             if let Some(ref data_arr) = biomes_nbt.data {
                 b_comp.put("data", NbtTag::LongArray(data_arr.to_vec()));
@@ -539,28 +698,19 @@ impl ChunkData {
             let biome_palette_tags: Vec<NbtTag> = biomes_nbt
                 .palette
                 .iter()
-                .map(|&val| {
-                    let name = pumpkin_data::biome::Biome::from_id(val)
-                        .map_or("plains", |b| b.registry_id);
-                    let full_name = if name.starts_with("minecraft:") {
-                        name.to_string()
-                    } else {
-                        format!("minecraft:{name}")
-                    };
-                    NbtTag::String(full_name.into())
-                })
+                .map(|&val| NbtTag::String(shared_biome_name(val)))
                 .collect();
             b_comp.put_list("palette", biome_palette_tags);
             section_comp.put_compound("biomes", b_comp);
 
             // block_light
-            if let Some(light_data) = extract_light_ref(light_lock.block_light.get(i)) {
+            if let Some(light_data) = extract_light_ref(light.block_light.get(i)) {
                 let bytes: Box<[i8]> = light_data.iter().map(|&x| x as i8).collect();
                 section_comp.put("BlockLight", NbtTag::ByteArray(bytes));
             }
 
             // sky_light
-            if let Some(light_data) = extract_light_ref(light_lock.sky_light.get(i)) {
+            if let Some(light_data) = extract_light_ref(light.sky_light.get(i)) {
                 let bytes: Box<[i8]> = light_data.iter().map(|&x| x as i8).collect();
                 section_comp.put("SkyLight", NbtTag::ByteArray(bytes));
             }
@@ -607,16 +757,17 @@ impl ChunkData {
             self.inhabited_time.load(Ordering::Relaxed) as i64,
         );
 
-        let custom_data = self
-            .custom_data
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !custom_data.is_empty() {
-            root_compound.put_compound("PumpkinCustomData", custom_data.clone());
+            root_compound.put_compound("PumpkinCustomData", custom_data);
         }
 
         let nbt = pumpkin_nbt::Nbt::from(root_compound);
-        nbt.write()
+        let result = nbt.write().map_err(ChunkSerializingError::from);
+        serialization_metrics::record_duration(
+            SerializationStage::Encode,
+            encode_started.elapsed(),
+        );
+        result
     }
 
     pub fn set_custom_data(&self, namespace: &str, key: &str, value: pumpkin_nbt::tag::NbtTag) {
@@ -698,6 +849,14 @@ impl Dirtiable for ChunkEntityData {
     fn is_dirty(&self) -> bool {
         self.dirty.load(Ordering::Relaxed)
     }
+
+    fn dirty_generation(&self) -> u64 {
+        self.dirty.generation()
+    }
+
+    fn mark_persisted(&self, generation: u64) {
+        self.dirty.mark_persisted(generation);
+    }
 }
 
 impl SingleChunkDataSerializer for ChunkEntityData {
@@ -739,19 +898,21 @@ impl ChunkEntityData {
         }
         .map_err(|e| ChunkParsingError::ErrorDeserializingChunk(e.to_string()))?;
 
-        let pos_array = match (nbt.get_int("Position-X"), nbt.get_int("Position-Z")) {
-            (Some(x), Some(z)) => [x, z],
-            _ => {
-                if let Some(pumpkin_nbt::tag::NbtTag::IntArray(pos)) = nbt.get("Position") {
-                    if pos.len() >= 2 {
-                        [pos[0], pos[1]]
-                    } else {
-                        [0, 0]
-                    }
-                } else {
-                    [0, 0]
-                }
+        let mut root = nbt.root_tag;
+        crate::world_info::schema::migrate_persistent_root(
+            crate::world_info::schema::PersistentRootSchema::EntityChunk,
+            &mut root,
+        )
+        .map_err(|error| ChunkParsingError::ErrorDeserializingChunk(error.to_string()))?;
+        let pos_array = if let Some(pumpkin_nbt::tag::NbtTag::IntArray(pos)) = root.get("Position")
+        {
+            if pos.len() >= 2 {
+                [pos[0], pos[1]]
+            } else {
+                [0, 0]
             }
+        } else {
+            [0, 0]
         };
 
         if pos_array[0] != position.x || pos_array[1] != position.y {
@@ -761,43 +922,69 @@ impl ChunkEntityData {
             )));
         }
 
-        let entities = match nbt.get("Entities") {
+        let residual_nbt = crate::persistence::bounded_residual_nbt(
+            &root,
+            ENTITY_CHUNK_AUTHORITATIVE_ROOT_KEYS.iter().copied(),
+            MAX_ENTITY_CHUNK_RESIDUAL_NBT_ENTRIES,
+            MAX_ENTITY_CHUNK_RESIDUAL_NBT_BYTES,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                "discarding residual NBT for entity chunk {},{}: {error}",
+                position.x,
+                position.y
+            );
+            NbtCompound::new()
+        });
+        let entities = match root.child_tags.remove("Entities") {
             Some(pumpkin_nbt::tag::NbtTag::List(list)) => list
-                .iter()
-                .filter_map(|t| match t {
-                    pumpkin_nbt::tag::NbtTag::Compound(c) => Some(c.clone()),
+                .into_iter()
+                .filter_map(|tag| match tag {
+                    pumpkin_nbt::tag::NbtTag::Compound(compound) => Some(compound),
                     _ => None,
                 })
                 .collect(),
             _ => Vec::new(),
         };
 
-        Ok(Self {
-            x: position.x,
-            z: position.y,
-            data: Mutex::new(entities),
-            dirty: AtomicBool::new(false),
-        })
+        let chunk = Self::from_entities(position, entities);
+        *chunk
+            .residual_nbt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = residual_nbt;
+        Ok(chunk)
     }
 
     async fn internal_to_bytes(&self) -> Result<Bytes, ChunkSerializingError> {
-        let mut root = NbtCompound::new();
+        let snapshot_started = Instant::now();
+        let mut root = self
+            .residual_nbt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         root.put_int("DataVersion", WORLD_DATA_VERSION);
         root.put(
             "Position",
             pumpkin_nbt::tag::NbtTag::IntArray(vec![self.x, self.z]),
         );
-        let entities_tag: Vec<pumpkin_nbt::tag::NbtTag> = self
-            .data
-            .lock()
-            .await
-            .iter()
-            .map(|c| pumpkin_nbt::tag::NbtTag::Compound(c.clone()))
-            .collect();
-        root.put_list("Entities", entities_tag);
-
-        let nbt = pumpkin_nbt::Nbt::from(root);
-        Ok(nbt.write())
+        let entities = self.entity_snapshot().await;
+        serialization_metrics::record_duration(
+            SerializationStage::Snapshot,
+            snapshot_started.elapsed(),
+        );
+        let encode_started = Instant::now();
+        let mut bytes = Vec::new();
+        let mut writer = NbtWriteHelperJava::new(&mut bytes);
+        writer.write_u8(COMPOUND_ID)?;
+        writer.write_string("")?;
+        root.serialize_entries(&mut writer)?;
+        NbtCompound::serialize_compound_list_entry("Entities", entities.as_slice(), &mut writer)?;
+        writer.write_u8(END_ID)?;
+        serialization_metrics::record_duration(
+            SerializationStage::Encode,
+            encode_started.elapsed(),
+        );
+        Ok(bytes.into())
     }
 }
 
@@ -897,9 +1084,36 @@ impl Default for LightContainer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pumpkin_data::Block;
+    use pumpkin_data::{Block, biome::Biome};
     use pumpkin_nbt::compound::NbtCompound;
     use pumpkin_nbt::tag::NbtTag;
+
+    #[test]
+    fn palette_identifiers_and_properties_reuse_shared_strings() {
+        let oak_log = Block::OAK_LOG.default_state.id;
+        let birch_log = Block::BIRCH_LOG.default_state.id;
+
+        let first_name = shared_block_name(oak_log);
+        let second_name = shared_block_name(oak_log);
+        assert_eq!(first_name.as_ref(), "minecraft:oak_log");
+        assert!(Arc::ptr_eq(&first_name, &second_name));
+
+        let oak_axis = shared_block_properties(oak_log)
+            .iter()
+            .find(|(name, _)| name.as_ref() == "axis")
+            .unwrap();
+        let birch_axis = shared_block_properties(birch_log)
+            .iter()
+            .find(|(name, _)| name.as_ref() == "axis")
+            .unwrap();
+        assert!(Arc::ptr_eq(&oak_axis.0, &birch_axis.0));
+        assert!(Arc::ptr_eq(&oak_axis.1, &birch_axis.1));
+
+        let first_biome = shared_biome_name(Biome::PLAINS.id);
+        let second_biome = shared_biome_name(Biome::PLAINS.id);
+        assert_eq!(first_biome.as_ref(), "minecraft:plains");
+        assert!(Arc::ptr_eq(&first_biome, &second_biome));
+    }
 
     #[test]
     fn extract_u16_array_from_vanilla_compound_palette() {
@@ -951,5 +1165,132 @@ mod tests {
                 .unwrap()
                 .id
         );
+    }
+
+    #[test]
+    fn future_chunk_data_version_is_rejected_before_decode() {
+        let mut root = NbtCompound::new();
+        root.put_int(
+            "DataVersion",
+            crate::world_info::MAXIMUM_SUPPORTED_WORLD_DATA_VERSION + 1,
+        );
+        let bytes = pumpkin_nbt::Nbt::from(root).write_unnamed().unwrap();
+
+        let error = match ChunkData::internal_from_bytes(&bytes, Vector2::new(0, 0)) {
+            Ok(_) => panic!("future chunk DataVersion should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported terrain chunk DataVersion")
+        );
+    }
+
+    #[tokio::test]
+    async fn entity_chunk_snapshot_is_immutable_and_round_trips_replacement() {
+        let position = Vector2::new(3, -7);
+        let mut pig = NbtCompound::new();
+        pig.put_string("id", "minecraft:pig".to_owned());
+        let chunk = ChunkEntityData::from_entities(position, vec![pig]);
+        let original_snapshot = chunk.entity_snapshot().await;
+        let original_generation = chunk.dirty.generation();
+
+        let mut wolf = NbtCompound::new();
+        wolf.put_string("id", "minecraft:wolf".to_owned());
+        chunk.replace_entities(vec![wolf]).await;
+
+        assert_eq!(original_snapshot[0].get_string("id"), Some("minecraft:pig"));
+        assert!(chunk.dirty.generation() > original_generation);
+
+        let bytes = chunk.internal_to_bytes().await.unwrap();
+        let decoded = ChunkEntityData::internal_from_bytes(&bytes, position).unwrap();
+        let decoded_entities = decoded.take_entities().await;
+        assert_eq!(decoded_entities.len(), 1);
+        assert_eq!(decoded_entities[0].get_string("id"), Some("minecraft:wolf"));
+    }
+
+    #[tokio::test]
+    async fn unknown_chunk_roots_survive_disk_restart_round_trip() {
+        fn read_named(bytes: &[u8]) -> NbtCompound {
+            let mut cursor = std::io::Cursor::new(bytes);
+            pumpkin_nbt::Nbt::read(&mut pumpkin_nbt::deserializer::NbtReadHelperJava::new(
+                &mut cursor,
+            ))
+            .unwrap()
+            .root_tag
+        }
+
+        let position = Vector2::new(0, 0);
+        let terrain = ChunkData::empty(0, 0);
+        let mut terrain_root = read_named(&terrain.internal_to_bytes().unwrap());
+        terrain_root.put_string("plugin:terrain_marker", "kept");
+        let terrain_bytes = pumpkin_nbt::Nbt::from(terrain_root).write().unwrap();
+        let terrain = ChunkData::internal_from_bytes(&terrain_bytes, position).unwrap();
+        let terrain_after_restart = read_named(&terrain.internal_to_bytes().unwrap());
+        assert_eq!(
+            terrain_after_restart.get_string("plugin:terrain_marker"),
+            Some("kept")
+        );
+        assert_eq!(terrain_after_restart.get_int("xPos"), Some(0));
+
+        let mut pig = NbtCompound::new();
+        pig.put_string("id", "minecraft:pig");
+        let entities = ChunkEntityData::from_entities(position, vec![pig]);
+        let mut entity_root = read_named(&entities.internal_to_bytes().await.unwrap());
+        entity_root.put_string("plugin:entity_chunk_marker", "kept");
+        entity_root.put_int("Position-X", 0);
+        entity_root.put_int("Position-Z", 0);
+        let entity_bytes = pumpkin_nbt::Nbt::from(entity_root).write().unwrap();
+        let entities = ChunkEntityData::internal_from_bytes(&entity_bytes, position).unwrap();
+        let entity_after_restart = read_named(&entities.internal_to_bytes().await.unwrap());
+        assert_eq!(
+            entity_after_restart.get_string("plugin:entity_chunk_marker"),
+            Some("kept")
+        );
+        assert!(entity_after_restart.get("Position-X").is_none());
+        assert!(entity_after_restart.get("Position-Z").is_none());
+        assert_eq!(
+            entity_after_restart.get("Position"),
+            Some(&NbtTag::IntArray(vec![0, 0]))
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_entity_payload_round_trips_brain_equipment_and_passengers() {
+        let mut simple = NbtCompound::new();
+        simple.put_string("id", "minecraft:pig".to_owned());
+
+        let mut memories = NbtCompound::new();
+        memories.put_long("minecraft:home", 42);
+        let mut brain = NbtCompound::new();
+        brain.put_compound("memories", memories);
+        let mut brain_entity = NbtCompound::new();
+        brain_entity.put_string("id", "minecraft:villager".to_owned());
+        brain_entity.put_compound("Brain", brain);
+
+        let mut helmet = NbtCompound::new();
+        helmet.put_string("id", "minecraft:iron_helmet".to_owned());
+        let mut sword = NbtCompound::new();
+        sword.put_string("id", "minecraft:iron_sword".to_owned());
+        let mut equipped = NbtCompound::new();
+        equipped.put_string("id", "minecraft:zombie".to_owned());
+        equipped.put_list("ArmorItems", vec![NbtTag::Compound(helmet)]);
+        equipped.put_list("HandItems", vec![NbtTag::Compound(sword)]);
+
+        let mut rider = NbtCompound::new();
+        rider.put_string("id", "minecraft:chicken".to_owned());
+        let mut vehicle = NbtCompound::new();
+        vehicle.put_string("id", "minecraft:boat".to_owned());
+        vehicle.put_list("Passengers", vec![NbtTag::Compound(rider)]);
+
+        let entities = vec![simple, brain_entity, equipped, vehicle];
+        let position = Vector2::new(-11, 9);
+        let chunk = ChunkEntityData::from_entities(position, entities.clone());
+
+        let bytes = chunk.internal_to_bytes().await.unwrap();
+        let decoded = ChunkEntityData::internal_from_bytes(&bytes, position).unwrap();
+
+        assert_eq!(decoded.take_entities().await, entities);
     }
 }

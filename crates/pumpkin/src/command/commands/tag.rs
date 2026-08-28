@@ -123,8 +123,7 @@ impl CommandExecutor for ListExecutor {
             // BTreeSet keeps the output deterministic.
             let mut all_tags = BTreeSet::new();
             for target in &targets {
-                let tags = target.get_entity().scoreboard_tags.lock().await;
-                all_tags.extend(tags.iter().cloned());
+                all_tags.extend(target.get_entity().scoreboard_tags_snapshot().await);
             }
 
             let tag_list =

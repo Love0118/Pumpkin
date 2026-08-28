@@ -1,6 +1,7 @@
-use std::collections::HashMap;
-use std::io::{Cursor, Read, Write};
+use std::collections::{BTreeMap, HashMap};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tracing::{info, warn};
 
 use flate2::Compression;
@@ -18,12 +19,16 @@ const SECTOR_SIZE: usize = 4096;
 const REGION_SIZE: usize = 32;
 const CHUNK_COUNT: usize = REGION_SIZE * REGION_SIZE;
 const HEADER_SIZE: usize = SECTOR_SIZE * 2; // Location table + timestamp table
+const MAX_DECOMPRESSED_POI_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+const MAX_POI_RESIDUAL_ENTRIES: usize = 256;
+const MAX_POI_RESIDUAL_BYTES: usize = 1024 * 1024;
 
 /// Compression type for MCA format
 const COMPRESSION_ZLIB: u8 = 2;
 
-// Data version for 1.21
-const DATA_VERSION: i32 = 3955;
+// Legacy Pumpkin POI files used 3955. The POI schema is identity-migrated on
+// read and every successful save writes the current world data version.
+const DATA_VERSION: i32 = crate::world_info::MAXIMUM_SUPPORTED_WORLD_DATA_VERSION;
 
 /// A single Point of Interest entry (serializable)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,16 +76,21 @@ pub struct PoiChunkData {
     pub data_version: i32,
     /// Sections keyed by Y section coordinate (e.g., "-1", "0", "1", "4")
     pub sections: HashMap<String, PoiSectionData>,
+    #[serde(skip)]
+    residual_nbt: pumpkin_nbt::compound::NbtCompound,
 }
 
 /// POI data for a single region (32x32 chunks) using MCA format
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PoiRegion {
     /// Entries indexed by position
     entries: HashMap<(i32, i32, i32), PoiEntry>,
     /// Track which chunks are dirty
     dirty_chunks: std::collections::HashSet<(i32, i32)>,
-    dirty: bool,
+    /// Unknown top-level chunk tags retained across load/save cycles.
+    residual_roots: HashMap<usize, pumpkin_nbt::compound::NbtCompound>,
+    mutation_generation: u64,
+    persisted_generation: u64,
 }
 
 impl PoiRegion {
@@ -112,7 +122,7 @@ impl PoiRegion {
         self.dirty_chunks.insert((chunk_x, chunk_z));
         let key = (entry.x, entry.y, entry.z);
         self.entries.insert(key, entry);
-        self.dirty = true;
+        self.mutation_generation = self.mutation_generation.saturating_add(1);
     }
 
     pub fn remove(&mut self, pos: &BlockPos) -> bool {
@@ -121,7 +131,7 @@ impl PoiRegion {
             let chunk_x = pos.0.x >> 4;
             let chunk_z = pos.0.z >> 4;
             self.dirty_chunks.insert((chunk_x, chunk_z));
-            self.dirty = true;
+            self.mutation_generation = self.mutation_generation.saturating_add(1);
             return true;
         }
         false
@@ -134,12 +144,19 @@ impl PoiRegion {
 
     #[must_use]
     pub const fn is_dirty(&self) -> bool {
-        self.dirty
+        self.mutation_generation != self.persisted_generation
     }
 
-    pub fn mark_clean(&mut self) {
-        self.dirty = false;
-        self.dirty_chunks.clear();
+    #[must_use]
+    pub const fn dirty_generation(&self) -> u64 {
+        self.mutation_generation
+    }
+
+    pub fn mark_persisted(&mut self, generation: u64) {
+        self.persisted_generation = self.persisted_generation.max(generation);
+        if self.persisted_generation == self.mutation_generation {
+            self.dirty_chunks.clear();
+        }
     }
 
     /// Group entries by chunk, then create chunk NBT data
@@ -170,13 +187,19 @@ impl PoiRegion {
             Some(PoiChunkData {
                 data_version: DATA_VERSION,
                 sections,
+                residual_nbt: self
+                    .residual_roots
+                    .get(&Self::chunk_index(chunk_x, chunk_z))
+                    .cloned()
+                    .unwrap_or_default(),
             })
         }
     }
 
     /// Compress chunk data to bytes
     fn compress_chunk_data(chunk_data: &PoiChunkData) -> std::io::Result<Vec<u8>> {
-        let mut root = pumpkin_nbt::compound::NbtCompound::new();
+        let snapshot_started = Instant::now();
+        let mut root = chunk_data.residual_nbt.clone();
         root.put_int("DataVersion", chunk_data.data_version);
 
         let mut sections_comp = pumpkin_nbt::compound::NbtCompound::new();
@@ -197,18 +220,46 @@ impl PoiRegion {
             sections_comp.put_compound(sec_key, sec_comp);
         }
         root.put_compound("Sections", sections_comp);
+        crate::serialization_metrics::record_duration(
+            crate::serialization_metrics::SerializationStage::Snapshot,
+            snapshot_started.elapsed(),
+        );
 
-        let uncompressed = pumpkin_nbt::Nbt::from(root).write();
+        let compress_started = Instant::now();
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&uncompressed)?;
-        encoder.finish()
+        pumpkin_nbt::Nbt::from(root)
+            .write_to_writer(&mut encoder)
+            .map_err(std::io::Error::other)?;
+        let compressed = encoder.finish()?;
+        crate::serialization_metrics::record_duration(
+            crate::serialization_metrics::SerializationStage::Compress,
+            compress_started.elapsed(),
+        );
+        crate::serialization_metrics::record_compressed_bytes(compressed.len());
+        Ok(compressed)
     }
 
     /// Decompress chunk data from bytes
     fn decompress_chunk_data(compressed: &[u8]) -> std::io::Result<PoiChunkData> {
-        let mut decoder = ZlibDecoder::new(compressed);
+        Self::decompress_chunk_data_with_limit(compressed, MAX_DECOMPRESSED_POI_CHUNK_BYTES)
+    }
+
+    fn decompress_chunk_data_with_limit(
+        compressed: &[u8],
+        max_decompressed_bytes: usize,
+    ) -> std::io::Result<PoiChunkData> {
+        let output_limit =
+            crate::chunk::io::decompression_output_limit(compressed.len(), max_decompressed_bytes)?;
+        let decoder = ZlibDecoder::new(compressed);
+        let mut limited = decoder.take(output_limit.saturating_add(1) as u64);
         let mut uncompressed = Vec::new();
-        decoder.read_to_end(&mut uncompressed)?;
+        limited.read_to_end(&mut uncompressed)?;
+        if uncompressed.len() > output_limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "POI chunk exceeds decompressed byte limit",
+            ));
+        }
 
         let mut cursor = Cursor::new(uncompressed);
         let mut reader = pumpkin_nbt::deserializer::NbtReadHelperJava::new(
@@ -217,10 +268,23 @@ impl PoiRegion {
         let nbt = pumpkin_nbt::Nbt::read(&mut reader)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
-        let data_version = nbt.get_int("DataVersion").unwrap_or(DATA_VERSION);
+        let mut root = nbt.root_tag;
+        crate::world_info::schema::migrate_persistent_root(
+            crate::world_info::schema::PersistentRootSchema::Poi,
+            &mut root,
+        )
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let residual_nbt = crate::persistence::bounded_residual_nbt(
+            &root,
+            ["DataVersion", "Sections"],
+            MAX_POI_RESIDUAL_ENTRIES,
+            MAX_POI_RESIDUAL_BYTES,
+        )
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+        let data_version = root.get_int("DataVersion").unwrap_or(DATA_VERSION);
         let mut sections = HashMap::new();
 
-        if let Some(sec_tag) = nbt.get_compound("Sections") {
+        if let Some(sec_tag) = root.get_compound("Sections") {
             for (sec_key, tag) in &sec_tag.child_tags {
                 if let pumpkin_nbt::tag::NbtTag::Compound(sec_comp) = tag {
                     let valid = sec_comp.get_byte("Valid").unwrap_or(1);
@@ -250,11 +314,12 @@ impl PoiRegion {
         Ok(PoiChunkData {
             data_version,
             sections,
+            residual_nbt,
         })
     }
 
     pub fn save(&mut self, path: &Path) -> std::io::Result<()> {
-        if !self.dirty {
+        if !self.is_dirty() {
             return Ok(());
         }
 
@@ -263,88 +328,67 @@ impl PoiRegion {
             if path.exists() {
                 std::fs::remove_file(path)?;
             }
-            self.dirty = false;
-            self.dirty_chunks.clear();
+            self.mark_persisted(self.mutation_generation);
             return Ok(());
         }
 
-        // Build all chunk data
-        let mut chunk_data_map: HashMap<usize, Vec<u8>> = HashMap::new();
-
-        // Collect all unique chunks that have entries
-        let mut chunks_with_data: std::collections::HashSet<(i32, i32)> =
-            std::collections::HashSet::new();
+        // Collect a small, deterministic index of chunks. Compressed payloads
+        // are produced and written one at a time inside the atomic temp file.
+        let mut chunks_with_data = BTreeMap::<usize, (i32, i32)>::new();
         for entry in self.entries.values() {
-            chunks_with_data.insert((entry.x >> 4, entry.z >> 4));
+            let chunk_x = entry.x >> 4;
+            let chunk_z = entry.z >> 4;
+            chunks_with_data.insert(Self::chunk_index(chunk_x, chunk_z), (chunk_x, chunk_z));
         }
 
-        for (chunk_x, chunk_z) in &chunks_with_data {
-            if let Some(chunk_data) = self.get_chunk_data(*chunk_x, *chunk_z) {
-                let compressed = Self::compress_chunk_data(&chunk_data)?;
-                let index = Self::chunk_index(*chunk_x, *chunk_z);
-                chunk_data_map.insert(index, compressed);
-            }
-        }
-
-        // Build MCA file
         let mut location_table = [0u32; CHUNK_COUNT];
         let mut timestamp_table = [0u32; CHUNK_COUNT];
-        let mut sector_data: Vec<Vec<u8>> = Vec::new();
-
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as u32);
 
-        // Start after header (2 sectors)
-        let mut current_sector: u32 = 2;
+        crate::persistence::atomic_write(path, |file| {
+            file.write_all(&[0; HEADER_SIZE])?;
+            let mut current_sector: u32 = 2;
 
-        for index in 0..CHUNK_COUNT {
-            if let Some(compressed) = chunk_data_map.get(&index) {
-                // Calculate sector count needed
-                let data_len = compressed.len() + 5; // 4 bytes length + 1 byte compression + data
-                let sector_count = data_len.div_ceil(SECTOR_SIZE) as u32;
+            for (&index, &(chunk_x, chunk_z)) in &chunks_with_data {
+                let Some(chunk_data) = self.get_chunk_data(chunk_x, chunk_z) else {
+                    continue;
+                };
+                let compressed = Self::compress_chunk_data(&chunk_data)?;
+                let data_len = compressed.len() + 5;
+                let sector_count = data_len.div_ceil(SECTOR_SIZE);
+                if sector_count > u8::MAX as usize {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("POI chunk {chunk_x},{chunk_z} exceeds MCA sector limit"),
+                    ));
+                }
 
-                // Build padded sector data
-                let mut padded = Vec::with_capacity(sector_count as usize * SECTOR_SIZE);
-                let length = (compressed.len() + 1) as u32; // +1 for compression byte
-                padded.extend_from_slice(&length.to_be_bytes());
-                padded.push(COMPRESSION_ZLIB);
-                padded.extend_from_slice(compressed);
-                // Pad to sector boundary
-                padded.resize(sector_count as usize * SECTOR_SIZE, 0);
-
-                location_table[index] = (current_sector << 8) | sector_count;
+                location_table[index] = (current_sector << 8) | sector_count as u32;
                 timestamp_table[index] = timestamp;
-                sector_data.push(padded);
-
-                current_sector += sector_count;
+                file.write_all(&((compressed.len() + 1) as u32).to_be_bytes())?;
+                file.write_all(&[COMPRESSION_ZLIB])?;
+                file.write_all(&compressed)?;
+                let padding = sector_count * SECTOR_SIZE - data_len;
+                for _ in 0..padding / SECTOR_SIZE {
+                    file.write_all(&[0; SECTOR_SIZE])?;
+                }
+                file.write_all(&vec![0; padding % SECTOR_SIZE])?;
+                current_sector += sector_count as u32;
             }
-        }
 
-        // Write file
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+            file.seek(SeekFrom::Start(0))?;
+            for loc in &location_table {
+                file.write_all(&loc.to_be_bytes())?;
+            }
+            for ts in &timestamp_table {
+                file.write_all(&ts.to_be_bytes())?;
+            }
+            Ok::<(), std::io::Error>(())
+        })?;
 
-        let mut file = std::fs::File::create(path)?;
-
-        // Write location table
-        for loc in &location_table {
-            file.write_all(&loc.to_be_bytes())?;
-        }
-
-        // Write timestamp table
-        for ts in &timestamp_table {
-            file.write_all(&ts.to_be_bytes())?;
-        }
-
-        // Write chunk data
-        for data in &sector_data {
-            file.write_all(data)?;
-        }
-
-        self.dirty = false;
-        self.dirty_chunks.clear();
+        self.mark_persisted(self.mutation_generation);
         Ok(())
     }
 
@@ -406,6 +450,11 @@ impl PoiRegion {
 
             match Self::decompress_chunk_data(compressed) {
                 Ok(chunk_data) => {
+                    if !chunk_data.residual_nbt.is_empty() {
+                        region
+                            .residual_roots
+                            .insert(index, chunk_data.residual_nbt.clone());
+                    }
                     for (_section_key, section) in chunk_data.sections {
                         for entry in section.records {
                             let key = (entry.x, entry.y, entry.z);
@@ -419,7 +468,7 @@ impl PoiRegion {
             }
         }
 
-        region.dirty = false;
+        region.persisted_generation = region.mutation_generation;
         Ok(region)
     }
 }
@@ -577,15 +626,38 @@ impl PoiStorage {
         best.map(|(pos, poi_type, _)| (pos, poi_type))
     }
 
-    pub fn save_all(&mut self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.folder)?;
+    pub async fn save_all(&mut self) -> std::io::Result<()> {
+        let folder = self.folder.clone();
+        let saves = self
+            .regions
+            .iter()
+            .filter(|(_, region)| region.is_dirty())
+            .map(|(&(rx, rz), region)| {
+                (
+                    (rx, rz),
+                    region.dirty_generation(),
+                    region.clone(),
+                    self.folder.join(format!("r.{rx}.{rz}.mca")),
+                )
+            })
+            .collect::<Vec<_>>();
+        let saved = saves.len();
 
-        let mut saved = 0;
-        for ((rx, rz), region) in &mut self.regions {
-            if region.is_dirty() {
-                let path = self.folder.join(format!("r.{rx}.{rz}.mca"));
+        let persisted = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(folder)?;
+            let mut persisted = Vec::with_capacity(saves.len());
+            for (key, generation, mut region, path) in saves {
                 region.save(&path)?;
-                saved += 1;
+                persisted.push((key, generation));
+            }
+            Ok::<_, std::io::Error>(persisted)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+
+        for (key, generation) in persisted {
+            if let Some(region) = self.regions.get_mut(&key) {
+                region.mark_persisted(generation);
             }
         }
 
@@ -669,8 +741,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn poi_storage_mca() {
+    #[tokio::test]
+    async fn poi_storage_mca() {
         let dir = std::env::temp_dir().join("pumpkin_poi_mca_test");
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -687,7 +759,7 @@ mod tests {
         );
         assert_eq!(results.len(), 2);
 
-        storage.save_all().unwrap();
+        storage.save_all().await.unwrap();
 
         // Verify .mca file was created
         let mca_path = dir.join("poi").join("r.0.0.mca");
@@ -701,6 +773,117 @@ mod tests {
             Some(POI_TYPE_NETHER_PORTAL),
         );
         assert_eq!(results2.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn poi_decompression_limit_rejects_overflow() {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&[0; 129]).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert!(PoiRegion::decompress_chunk_data_with_limit(&compressed, 128).is_err());
+    }
+
+    #[test]
+    fn poi_decompression_rejects_hostile_compression_ratio() {
+        let raw = vec![0; 1024 * 1024];
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&raw).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert!(PoiRegion::decompress_chunk_data_with_limit(&compressed, raw.len()).is_err());
+    }
+
+    #[test]
+    fn poi_persisted_generation_does_not_clear_newer_mutation() {
+        let mut region = PoiRegion::new();
+        region.add(PoiEntry {
+            x: 0,
+            y: 64,
+            z: 0,
+            poi_type: POI_TYPE_NETHER_PORTAL.to_owned(),
+            free_tickets: 0,
+        });
+        let snapshot_generation = region.dirty_generation();
+        region.add(PoiEntry {
+            x: 1,
+            y: 64,
+            z: 0,
+            poi_type: POI_TYPE_NETHER_PORTAL.to_owned(),
+            free_tickets: 0,
+        });
+
+        region.mark_persisted(snapshot_generation);
+
+        assert!(region.is_dirty());
+    }
+
+    #[test]
+    fn poi_data_version_identity_migration_writes_current_and_rejects_future() {
+        let legacy = PoiChunkData {
+            data_version: crate::world_info::schema::MINIMUM_SUPPORTED_POI_DATA_VERSION,
+            sections: HashMap::new(),
+            residual_nbt: pumpkin_nbt::compound::NbtCompound::new(),
+        };
+        let compressed = PoiRegion::compress_chunk_data(&legacy).unwrap();
+        assert_eq!(
+            PoiRegion::decompress_chunk_data(&compressed)
+                .unwrap()
+                .data_version,
+            DATA_VERSION
+        );
+
+        let future = PoiChunkData {
+            data_version: DATA_VERSION + 1,
+            sections: HashMap::new(),
+            residual_nbt: pumpkin_nbt::compound::NbtCompound::new(),
+        };
+        let compressed = PoiRegion::compress_chunk_data(&future).unwrap();
+        assert!(PoiRegion::decompress_chunk_data(&compressed).is_err());
+    }
+
+    #[test]
+    fn poi_unknown_root_survives_disk_restart_and_rewrite() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "pumpkin_poi_residual_{}_{}",
+            std::process::id(),
+            nonce
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.0.0.mca");
+
+        let mut region = PoiRegion::new();
+        region.add(PoiEntry::new_portal(BlockPos(Vector3::new(1, 64, 1))));
+        let mut residual = pumpkin_nbt::compound::NbtCompound::new();
+        residual.put_string("plugin:marker", "kept");
+        residual.put_int("DataVersion", -1);
+        residual.put_string("Sections", "stale");
+        region.residual_roots.insert(0, residual);
+        region.save(&path).unwrap();
+
+        let mut reloaded = PoiRegion::load(&path).unwrap();
+        reloaded.add(PoiEntry::new_portal(BlockPos(Vector3::new(2, 64, 2))));
+        reloaded.save(&path).unwrap();
+
+        let restarted = PoiRegion::load(&path).unwrap();
+        let chunk = restarted.get_chunk_data(0, 0).unwrap();
+        assert_eq!(chunk.residual_nbt.get_string("plugin:marker"), Some("kept"));
+        assert!(chunk.residual_nbt.get("DataVersion").is_none());
+        assert!(chunk.residual_nbt.get("Sections").is_none());
+        assert_eq!(chunk.data_version, DATA_VERSION);
+        assert_eq!(
+            chunk
+                .sections
+                .values()
+                .map(|section| section.records.len())
+                .sum::<usize>(),
+            2
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

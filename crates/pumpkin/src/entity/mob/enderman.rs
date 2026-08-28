@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Weak,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicI64, Ordering},
 };
 
 use crate::entity::attributes::Modifier;
@@ -27,15 +27,17 @@ use pumpkin_util::math::{boundingbox::BoundingBox, position::BlockPos, vector3::
 use rand::RngExt;
 
 use crate::entity::{
-    Entity, EntityBase, NbtFuture,
+    DamageContext, Entity, EntityBase, NbtFuture,
     ai::{
         goal::{
             GoalFuture, active_target::ActiveTargetGoal, chase_player::ChasePlayerGoal,
             look_around::RandomLookAroundGoal, look_at_entity::LookAtEntityGoal,
-            melee_attack::MeleeAttackGoal, pick_up_block::PickUpBlockGoal,
-            place_block::PlaceBlockGoal, revenge::RevengeGoal, swim::SwimGoal,
-            teleport_towards_player::TeleportTowardsPlayerGoal, wander_around::WanderAroundGoal,
+            melee_attack::MeleeAttackGoal, persistent_anger_target::PersistentAngerTargetGoal,
+            pick_up_block::PickUpBlockGoal, place_block::PlaceBlockGoal, revenge::RevengeGoal,
+            swim::SwimGoal, teleport_towards_player::TeleportTowardsPlayerGoal,
+            wander_around::WanderAroundGoal,
         },
+        neutral::{NeutralMob, PersistentAngerState},
         pathfinder::node::PathType,
     },
     mob::{Mob, MobEntity},
@@ -44,6 +46,10 @@ use crate::entity::{
 
 const SPEED_BOOST: f64 = 0.15;
 const ENDERMAN_SPEED_BOOST_ID: &str = "minecraft:attacking";
+const CREEPY_STARE_SOUND_DELAY: i64 = 400;
+const SUNLIGHT_DEAGGRESSION_DELAY: i64 = 600;
+const NIGHT_START: i64 = 12_542;
+const NIGHT_END: i64 = 23_459;
 
 pub const ENDERMAN_EYE_HEIGHT: f64 = 2.55;
 pub const ENDERMAN_BODY_Y_OFFSET: f64 = 1.45;
@@ -60,6 +66,9 @@ pub struct EndermanEntity {
     angry: AtomicBool,
     provoked: AtomicBool,
     speed_boosted: AtomicBool,
+    target_change_time: AtomicI64,
+    last_stare_sound: AtomicI64,
+    persistent_anger: PersistentAngerState,
 }
 
 impl EndermanEntity {
@@ -71,6 +80,9 @@ impl EndermanEntity {
             angry: AtomicBool::new(false),
             provoked: AtomicBool::new(false),
             speed_boosted: AtomicBool::new(false),
+            target_change_time: AtomicI64::new(0),
+            last_stare_sound: AtomicI64::new(-CREEPY_STARE_SOUND_DELAY),
+            persistent_anger: PersistentAngerState::default(),
         };
         let mob_arc = Arc::new(entity);
         let mob_weak: Weak<dyn Mob> = {
@@ -113,6 +125,7 @@ impl EndermanEntity {
 
             target_selector.add_goal(1, Box::new(TeleportTowardsPlayerGoal::new(mob_arc.clone())));
             target_selector.add_goal(2, Box::new(RevengeGoal::new(true)));
+            target_selector.add_goal(2, PersistentAngerTargetGoal::new());
             target_selector.add_goal(
                 3,
                 ActiveTargetGoal::with_default(&mob_arc.mob_entity, &EntityType::ENDERMITE, true),
@@ -266,6 +279,14 @@ impl EndermanEntity {
     }
 
     pub async fn set_target(&self, target: Option<Arc<dyn EntityBase>>) {
+        let target_change_time = self
+            .mob_entity
+            .living_entity
+            .entity
+            .age
+            .load(Ordering::Relaxed);
+        self.target_change_time
+            .store(i64::from(target_change_time), Ordering::Relaxed);
         let mut mob_target = self.mob_entity.target.lock().await;
         (*mob_target).clone_from(&target);
         drop(mob_target);
@@ -410,6 +431,34 @@ impl EndermanEntity {
             .await
             .is_none()
     }
+
+    fn maybe_play_stare_sound(&self, game_time: i64) {
+        if !self.provoked.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let last_sound = self.last_stare_sound.load(Ordering::Relaxed);
+        if game_time < last_sound + CREEPY_STARE_SOUND_DELAY {
+            return;
+        }
+
+        self.last_stare_sound.store(game_time, Ordering::Relaxed);
+        let entity = &self.mob_entity.living_entity.entity;
+        let world = entity.world.load();
+        world.play_sound_fine(
+            Sound::EntityEndermanStare,
+            SoundCategory::Hostile,
+            &entity.get_eye_pos(),
+            2.5,
+            1.0,
+        );
+    }
+}
+
+impl NeutralMob for EndermanEntity {
+    fn persistent_anger_state(&self) -> &PersistentAngerState {
+        &self.persistent_anger
+    }
 }
 
 impl Mob for EndermanEntity {
@@ -418,6 +467,7 @@ impl Mob for EndermanEntity {
             if let Some(block_state) = self.carried_block.load() {
                 nbt.put_int("carriedBlockState", block_state.as_u16() as i32);
             }
+            self.write_persistent_anger_nbt(nbt);
         })
     }
 
@@ -426,11 +476,16 @@ impl Mob for EndermanEntity {
             if let Some(block_state) = nbt.get_int("carriedBlockState") {
                 self.set_carried_block(BlockStateId::new(block_state as u16));
             }
+            self.read_persistent_anger_nbt(nbt).await;
         })
     }
 
     fn get_mob_entity(&self) -> &MobEntity {
         &self.mob_entity
+    }
+
+    fn as_neutral(&self) -> Option<&dyn NeutralMob> {
+        Some(self)
     }
 
     fn set_mob_target(&self, target: Option<Arc<dyn EntityBase>>) -> GoalFuture<'_, ()> {
@@ -439,7 +494,6 @@ impl Mob for EndermanEntity {
         })
     }
 
-    // TODO: sunlight avoidance, carried block drop on death, angerable system, ambient sound override
     fn mob_tick<'a>(&'a self, _caller: &'a Arc<dyn EntityBase>) -> GoalFuture<'a, ()> {
         Box::pin(async move {
             let entity = &self.mob_entity.living_entity.entity;
@@ -447,16 +501,45 @@ impl Mob for EndermanEntity {
                 return;
             }
 
+            self.update_persistent_anger(true).await;
+
             let world = entity.world.load();
+            let game_time = world.get_world_age().await;
+            self.maybe_play_stare_sound(game_time);
+
             let raining_at_feet = world.is_raining_at(&entity.block_pos.load()).await;
             let raining_at_head = world
                 .is_raining_at(&entity.bounding_box.load().max_block_pos())
                 .await;
             if entity.touching_water.load(Ordering::SeqCst) || raining_at_feet || raining_at_head {
+                for _ in 0..64 {
+                    if self.teleport_randomly() {
+                        break;
+                    }
+                }
                 self.mob_entity
                     .living_entity
-                    .damage_with_context(self, 1.0, DamageType::DROWN, None, None, None)
+                    .damage_with_context(self, DamageContext::new(1.0, DamageType::DROWN))
                     .await;
+                return;
+            }
+
+            let target_present = self.mob_entity.get_target().await.is_some();
+            let day_time = world.get_time_of_day().await.rem_euclid(24_000);
+            let sky_brightness =
+                f32::from(world.get_max_local_raw_brightness(&entity.block_pos.load())) / 15.0;
+            let in_daylight = !(NIGHT_START..=NIGHT_END).contains(&day_time)
+                && world.can_see_sky(&entity.block_pos.load())
+                && sky_brightness > 0.5;
+            let target_old_enough = i64::from(entity.age.load(Ordering::Relaxed))
+                >= self.target_change_time.load(Ordering::Relaxed) + SUNLIGHT_DEAGGRESSION_DELAY;
+            if target_present
+                && in_daylight
+                && target_old_enough
+                && self.get_random().random::<f32>() * 30.0 < (sky_brightness - 0.4) * 2.0
+            {
+                self.set_target(None).await;
+                self.teleport_randomly();
             }
 
             // NOTE: Enderman ambient portal particles are intentionally NOT sent server-side.

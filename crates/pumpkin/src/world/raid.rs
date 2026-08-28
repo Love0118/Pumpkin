@@ -251,7 +251,7 @@ impl Raid {
     }
 
     pub async fn remove_all_players(&mut self, world: &World) {
-        let players = world.players.load();
+        let players = world.players.load_full();
         for player in players.iter() {
             if self.players_in_raid.contains(&player.gameprofile.id) {
                 player.remove_bossbar(self.bossbar.uuid).await;
@@ -480,7 +480,11 @@ impl Raid {
 
         for player_uuid in to_remove {
             self.players_in_raid.remove(&player_uuid);
-            if let Some(player) = players.iter().find(|p| p.gameprofile.id == player_uuid) {
+            let player = players
+                .iter()
+                .find(|player| player.gameprofile.id == player_uuid)
+                .cloned();
+            if let Some(player) = player {
                 player.remove_bossbar(self.bossbar.uuid).await;
             }
         }

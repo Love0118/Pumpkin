@@ -10,9 +10,8 @@ use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_util::math::position::BlockPos;
 use rustc_hash::FxHashMap;
 
-use std::sync::RwLock;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -66,6 +65,79 @@ pub enum CompressionError {
     ZstdError(std::io::Error),
 }
 
+/// Monotonic mutation and persistence generations for chunk save state.
+pub struct DirtyState {
+    generation: AtomicU64,
+    persisted_generation: AtomicU64,
+}
+
+impl DirtyState {
+    #[must_use]
+    pub const fn new(dirty: bool) -> Self {
+        Self {
+            generation: AtomicU64::new(if dirty { 1 } else { 0 }),
+            persisted_generation: AtomicU64::new(0),
+        }
+    }
+
+    pub fn store(&self, dirty: bool, _ordering: Ordering) {
+        if dirty {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        } else {
+            let generation = self.generation.load(Ordering::Acquire);
+            self.persisted_generation
+                .store(generation, Ordering::Release);
+        }
+    }
+
+    #[must_use]
+    pub fn load(&self, _ordering: Ordering) -> bool {
+        self.generation.load(Ordering::Acquire) != self.persisted_generation.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub fn mark_persisted(&self, generation: u64) {
+        self.persisted_generation
+            .fetch_max(generation, Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+mod dirty_state_tests {
+    use std::sync::atomic::Ordering;
+
+    use super::DirtyState;
+
+    #[test]
+    fn persisting_an_old_generation_keeps_newer_mutations_dirty() {
+        let state = DirtyState::new(false);
+        state.store(true, Ordering::Relaxed);
+        let snapshot_generation = state.generation();
+        state.store(true, Ordering::Relaxed);
+
+        state.mark_persisted(snapshot_generation);
+
+        assert!(state.load(Ordering::Relaxed));
+        state.mark_persisted(state.generation());
+        assert!(!state.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn direct_dirty_store_advances_the_generation() {
+        let state = DirtyState::new(false);
+        let initial_generation = state.generation();
+
+        state.store(true, Ordering::Relaxed);
+
+        assert!(state.generation() > initial_generation);
+        assert!(state.load(Ordering::Relaxed));
+    }
+}
+
 // Clone here cause we want to clone a snapshot of the chunk so we don't block writing for too long
 pub struct ChunkData {
     pub section: ChunkSections,
@@ -80,9 +152,11 @@ pub struct ChunkData {
     pub light_populated: AtomicBool,
     pub status: ChunkStatus,
     pub blending_data: Option<crate::generation::blender::blending_data::BlendingData>,
-    pub dirty: AtomicBool,
+    pub dirty: DirtyState,
     pub inhabited_time: AtomicU64,
     pub custom_data: std::sync::Mutex<NbtCompound>,
+    #[doc(hidden)]
+    pub residual_nbt: std::sync::Mutex<NbtCompound>,
 }
 
 pub struct ChunkEntityData {
@@ -90,9 +164,57 @@ pub struct ChunkEntityData {
     pub x: i32,
     /// Chunk Z
     pub z: i32,
-    pub data: Mutex<Vec<NbtCompound>>,
+    #[expect(
+        clippy::rc_buffer,
+        reason = "Arc<Vec<_>> permits zero-copy try_unwrap when unload takes the last immutable entity snapshot"
+    )]
+    data: Mutex<Arc<Vec<NbtCompound>>>,
+    residual_nbt: std::sync::Mutex<NbtCompound>,
 
-    pub dirty: AtomicBool,
+    pub dirty: DirtyState,
+}
+
+impl ChunkEntityData {
+    #[must_use]
+    pub(crate) fn empty(position: pumpkin_util::math::vector2::Vector2<i32>) -> Self {
+        Self::from_entities(position, Vec::new())
+    }
+
+    #[must_use]
+    pub(crate) fn from_entities(
+        position: pumpkin_util::math::vector2::Vector2<i32>,
+        entities: Vec<NbtCompound>,
+    ) -> Self {
+        Self {
+            x: position.x,
+            z: position.y,
+            data: Mutex::new(Arc::new(entities)),
+            residual_nbt: std::sync::Mutex::new(NbtCompound::new()),
+            dirty: DirtyState::new(false),
+        }
+    }
+
+    /// Replaces this chunk's persisted entity payload and advances its mutation generation.
+    pub async fn replace_entities(&self, entities: Vec<NbtCompound>) {
+        *self.data.lock().await = Arc::new(entities);
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    /// Takes ownership of the persisted payload when possible.
+    ///
+    /// A concurrent serializer may still hold an immutable snapshot. In that rare
+    /// case the payload is cloned so both operations observe a stable value.
+    pub async fn take_entities(&self) -> Vec<NbtCompound> {
+        let snapshot = {
+            let mut data = self.data.lock().await;
+            std::mem::replace(&mut *data, Arc::new(Vec::new()))
+        };
+        Arc::try_unwrap(snapshot).unwrap_or_else(|shared| shared.as_ref().clone())
+    }
+
+    pub(crate) async fn entity_snapshot(&self) -> Arc<Vec<NbtCompound>> {
+        self.data.lock().await.clone()
+    }
 }
 
 /// Represents pure block data for a chunk.
@@ -613,9 +735,10 @@ impl ChunkData {
             light_populated: std::sync::atomic::AtomicBool::new(false),
             status: ChunkStatus::Full,
             blending_data: None,
-            dirty: std::sync::atomic::AtomicBool::new(false),
+            dirty: DirtyState::new(false),
             inhabited_time: std::sync::atomic::AtomicU64::new(0),
             custom_data: std::sync::Mutex::new(NbtCompound::new()),
+            residual_nbt: std::sync::Mutex::new(NbtCompound::new()),
         }
     }
 
@@ -821,7 +944,7 @@ pub enum ChunkParsingError {
 #[derive(Error, Debug)]
 pub enum ChunkSerializingError {
     #[error("Error serializing chunk: {0}")]
-    ErrorSerializingChunk(pumpkin_nbt::Error),
+    ErrorSerializingChunk(#[from] pumpkin_nbt::Error),
 }
 
 #[cfg(test)]

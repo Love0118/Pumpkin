@@ -19,7 +19,11 @@ use std::{
 };
 use tracing::{debug, error, info, trace, warn};
 
+const MAX_BLOCK_ENTITY_RESIDUAL_ENTRIES: usize = 256;
+const MAX_BLOCK_ENTITY_RESIDUAL_BYTES: usize = 256 * 1024;
+
 pub mod chunker;
+mod entity_index;
 pub mod explosion;
 pub mod loot;
 pub mod map;
@@ -30,6 +34,7 @@ pub mod villager_poi;
 
 use crate::block::RandomTickArgs;
 use crate::world::chunker::is_within_view_distance;
+use crate::world::entity_index::EntityIndex;
 use crate::world::{chunker::get_view_distance, loot::LootContextParameters};
 use crate::{block::BlockEvent, entity::item::ItemEntity};
 use crate::{
@@ -233,6 +238,16 @@ impl PumpkinError for GetBlockError {
     }
 }
 
+fn serialize_unnamed_nbt(nbt: NbtCompound, context: &str) -> Option<Box<[u8]>> {
+    match pumpkin_nbt::Nbt::from(nbt).write_unnamed() {
+        Ok(bytes) => Some(bytes.as_ref().into()),
+        Err(serialization_error) => {
+            error!("Failed to serialize {context}: {serialization_error}");
+            None
+        }
+    }
+}
+
 /// Represents a Minecraft world, containing entities, players, and the underlying level data.
 ///
 /// Each dimension (Overworld, Nether, End) typically has its own `World`.
@@ -253,6 +268,8 @@ pub struct World {
     /// A map of active entities within the world, keyed by their unique UUID.
     /// This does not include players.
     pub entities: ArcSwap<Vec<Arc<dyn EntityBase>>>,
+    /// Atomic ID and UUID lookup views for all live entities, including players.
+    entity_index: EntityIndex<dyn EntityBase>,
     /// The world's scoreboard, used for tracking scores, objectives, and display information.
     pub scoreboard: Mutex<Scoreboard>,
     /// The world's worldborder, defining the playable area and controlling its expansion or contraction.
@@ -289,6 +306,8 @@ pub struct World {
     pub custom_data: std::sync::Mutex<NbtCompound>,
     /// Persistent custom data for block entities at specific positions
     pub custom_block_entity_data: DashMap<BlockPos, NbtCompound>,
+    /// Bounded unknown block-entity roots retained across chunk rewrites.
+    block_entity_residual_data: DashMap<BlockPos, NbtCompound>,
 }
 
 #[derive(Clone, Copy)]
@@ -305,6 +324,24 @@ impl PartialEq for World {
 }
 
 impl Eq for World {}
+
+async fn complete_world_save_transaction<Poi, Custom, Terrain, Entities>(
+    poi: Poi,
+    custom: Custom,
+    terrain: Terrain,
+    entities: Entities,
+) -> Result<(), String>
+where
+    Poi: Future<Output = Result<(), String>>,
+    Custom: Future<Output = Result<(), String>>,
+    Terrain: Future<Output = Result<(), String>>,
+    Entities: Future<Output = Result<(), String>>,
+{
+    poi.await?;
+    custom.await?;
+    tokio::try_join!(terrain, entities)?;
+    Ok(())
+}
 
 impl World {
     pub async fn get_block_state_id_async(&self, position: &BlockPos) -> BlockStateId {
@@ -384,6 +421,7 @@ impl World {
             level_info,
             players: ArcSwap::new(Arc::new(Vec::new())),
             entities: ArcSwap::new(Arc::new(Vec::new())),
+            entity_index: EntityIndex::default(),
             scoreboard: Mutex::new(Scoreboard::default()),
             worldborder: Mutex::new(Worldborder::new(0.0, 0.0, 5.999_996_8E7, 0, 5, 300)),
             level_time: Mutex::new(LevelTime::new()),
@@ -405,6 +443,7 @@ impl World {
             block_entities: DashMap::new(),
             custom_data: std::sync::Mutex::new(custom_data),
             custom_block_entity_data: DashMap::new(),
+            block_entity_residual_data: DashMap::new(),
         }
     }
 
@@ -471,45 +510,45 @@ impl World {
         )
     }
 
-    pub async fn shutdown(&self) {
-        for entity in self.entities.load().iter() {
-            self.save_entity(entity).await;
-        }
-
-        let chunks: Vec<Vector2<i32>> = self
-            .block_entities
-            .iter()
-            .map(|chunk_block_entities| *chunk_block_entities.key())
-            .collect();
-        for chunk_pos in chunks {
-            self.save_block_entities(&chunk_pos).await;
-        }
-
-        // Save portal POI to disk
-        let save_result = self.portal_poi.lock().await.save_all();
-        if let Err(e) = save_result {
-            error!("Failed to save portal POI: {e}");
-        }
-
-        self.level.shutdown().await;
+    pub async fn shutdown(&self) -> Result<(), String> {
+        self.save().await?;
+        self.shutdown_after_save().await
     }
 
-    /// Serializes a live entity into its current chunk's entity data. The live
-    /// entity list is the source of truth while a chunk is loaded (its saved NBT
-    /// is consumed on load), so this simply appends the entity to the chunk it is
-    /// currently in; the chunk is rewritten from scratch every unload cycle, so
-    /// there is nothing stale to deduplicate.
-    async fn save_entity(&self, entity: &Arc<dyn EntityBase>) {
-        let base_entity = entity.get_entity();
-        if base_entity.is_removed() {
-            return;
+    pub(crate) async fn shutdown_after_save(&self) -> Result<(), String> {
+        self.level.shutdown().await
+    }
+
+    /// Replaces the persisted entity list for every supplied chunk from one
+    /// immutable live-entity snapshot. Replacement prevents repeated manual
+    /// saves from appending duplicate NBT and clears entities removed since the
+    /// previous durable save.
+    async fn save_entity_snapshots(
+        &self,
+        entities: &[Arc<dyn EntityBase>],
+        chunks: impl IntoIterator<Item = Vector2<i32>>,
+    ) {
+        let mut snapshots = FxHashMap::<Vector2<i32>, Vec<NbtCompound>>::default();
+        for entity in entities {
+            let base_entity = entity.get_entity();
+            if base_entity.is_removed() {
+                continue;
+            }
+
+            let chunk_pos = base_entity.block_pos.load().chunk_position();
+            let mut nbt = NbtCompound::new();
+            entity.write_nbt(&mut nbt).await;
+            snapshots.entry(chunk_pos).or_default().push(nbt);
         }
-        let current_chunk = base_entity.block_pos.load().chunk_position();
-        let mut nbt = NbtCompound::new();
-        entity.write_nbt(&mut nbt).await;
-        let chunk = self.level.get_entity_chunk(current_chunk).await;
-        chunk.data.lock().await.push(nbt);
-        chunk.mark_dirty(true);
+
+        let mut chunks = chunks.into_iter().collect::<FxHashSet<_>>();
+        chunks.extend(snapshots.keys().copied());
+        for chunk_pos in chunks {
+            let chunk = self.level.get_entity_chunk(chunk_pos).await;
+            chunk
+                .replace_entities(snapshots.remove(&chunk_pos).unwrap_or_default())
+                .await;
+        }
     }
 
     /// Serializes the live block entities of a chunk back into that chunk's block
@@ -527,15 +566,20 @@ impl World {
         };
 
         for block_entity in block_entities {
-            let mut nbt = NbtCompound::new();
-            block_entity.write_internal(&mut nbt).await;
-            if let Some(custom_data) = self
+            let custom_data = self
                 .custom_block_entity_data
                 .get(&block_entity.get_position())
-                && !custom_data.is_empty()
-            {
-                nbt.put_compound("PumpkinCustomData", custom_data.clone());
-            }
+                .filter(|custom_data| !custom_data.is_empty())
+                .map(|custom_data| custom_data.clone());
+            let residual = self
+                .block_entity_residual_data
+                .get(&block_entity.get_position())
+                .filter(|residual| !residual.is_empty())
+                .map(|residual| residual.clone());
+            let nbt = block_entity
+                .capture_save_snapshot()
+                .await
+                .into_nbt_with_residual(custom_data, residual);
             self.add_block_entity_nbt(block_entity.get_position(), &nbt);
         }
     }
@@ -737,6 +781,21 @@ impl World {
         }
     }
 
+    fn broadcast_java_state_grouped<P: ClientPacket>(
+        packet: &P,
+        kind: crate::net::StatePacketKind,
+        recipients_by_version: BTreeMap<JavaMinecraftVersion, Vec<&JavaClient>>,
+    ) {
+        for (version, recipients) in recipients_by_version {
+            let Ok(packet_data) = JavaClient::serialize_packet_for_version(packet, version) else {
+                continue;
+            };
+            for recipient in recipients {
+                recipient.try_enqueue_state_packet(kind, packet_data.clone());
+            }
+        }
+    }
+
     fn broadcast_bedrock_grouped<'a, P: BClientPacket>(
         packet: &P,
         recipients: impl Iterator<Item = &'a Arc<BedrockClient>>,
@@ -751,6 +810,18 @@ impl World {
                         err
                     );
                 }
+            }
+        }
+    }
+
+    fn broadcast_bedrock_state_grouped<'a, P: BClientPacket>(
+        packet: &P,
+        kind: crate::net::StatePacketKind,
+        recipients: impl Iterator<Item = &'a Arc<BedrockClient>>,
+    ) {
+        for recipient in recipients {
+            if let Ok(packet_data) = recipient.serialize_packet(packet) {
+                recipient.try_enqueue_state_packet(kind, packet_data);
             }
         }
     }
@@ -994,12 +1065,22 @@ impl World {
             let packet = CSetEntityMetadata::new(entity_id.into(), buf.into());
             if let Ok(packet_data) = JavaClient::serialize_packet_for_version(&packet, version) {
                 for recipient in recipients {
-                    recipient.try_enqueue_packet(packet_data.clone());
+                    recipient.try_enqueue_state_packet(
+                        crate::net::StatePacketKind::Metadata(entity_id),
+                        packet_data.clone(),
+                    );
                 }
             }
         }
 
-        Self::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
+        for recipient in bedrock_recipients {
+            if let Ok(packet_data) = recipient.serialize_packet(be_packet) {
+                recipient.try_enqueue_state_packet(
+                    crate::net::StatePacketKind::Metadata(entity_id),
+                    packet_data,
+                );
+            }
+        }
     }
 
     pub async fn broadcast_packet_except_editioned<J: ClientPacket, B: BClientPacket>(
@@ -1449,14 +1530,14 @@ impl World {
                 );
                 if let Some(block_entity) = self.get_block_entity(&block_pos)
                     && let Some(nbt) = block_entity.chunk_data_nbt()
+                    && let Some(bytes) = serialize_unnamed_nbt(nbt, "block entity update")
                 {
-                    let bytes = pumpkin_nbt::Nbt::from(nbt).write_unnamed();
                     self.broadcast_to_chunk(
                         chunk_pos,
                         &CBlockEntityData::new(
                             block_pos,
                             VarInt(block_entity.get_id() as i32),
-                            bytes.as_ref().into(),
+                            bytes,
                         ),
                     );
                 }
@@ -1522,14 +1603,14 @@ impl World {
                 for (block_pos, _) in &updates {
                     if let Some(block_entity) = self.get_block_entity(block_pos)
                         && let Some(nbt) = block_entity.chunk_data_nbt()
+                        && let Some(bytes) = serialize_unnamed_nbt(nbt, "block entity update")
                     {
-                        let bytes = pumpkin_nbt::Nbt::from(nbt).write_unnamed();
                         self.broadcast_to_chunk(
                             chunk_pos,
                             &CBlockEntityData::new(
                                 *block_pos,
                                 VarInt(block_entity.get_id() as i32),
-                                bytes.as_ref().into(),
+                                bytes,
                             ),
                         );
                     }
@@ -4044,7 +4125,12 @@ impl World {
 
                         // Detach from the old world before publishing into the new one, so no
                         // observer sees the player in a world whose chunk manager doesn't match.
-                        self.remove_player(player, false).await;
+                        self.remove_player_with_reason(
+                            player,
+                            false,
+                            RemovalReason::ChangedDimension,
+                        )
+                        .await;
                         player.unload_watched_chunks(self).await;
                         player
                             .chunk_manager
@@ -4052,11 +4138,9 @@ impl World {
                             .await
                             .change_world(&self.level, destination.clone());
                         player.living_entity.entity.set_world(destination.clone());
-                        destination.players.rcu(|current_list| {
-                            let mut new_list = (**current_list).clone();
-                            new_list.push(player.clone());
-                            new_list
-                        });
+                        if let Err(error) = destination.add_player(player) {
+                            error!(%error, "Failed to index player in respawn destination world");
+                        }
                     }
 
                     (Some(destination), position, yaw, pitch)
@@ -4308,9 +4392,11 @@ impl World {
                     // truth, so the chunk's NBT is taken (cleared) to avoid keeping
                     // a duplicate copy that would be re-appended on the next unload
                     // and doubled on every reload.
-                    let entity_nbts = std::mem::take(&mut *chunk.data.lock().await);
-                    let mut entities_to_add: Vec<Arc<dyn EntityBase>> =
-                        Vec::with_capacity(entity_nbts.len());
+                    let entity_nbts = chunk.take_entities().await;
+                    let entity_count = entity_nbts.len();
+                    if !world.load_entities(position, entity_count).await {
+                        continue 'main;
+                    }
                     for entity_nbt in &entity_nbts {
                         let Some(id) = entity_nbt.get_string("id") else {
                             debug!("Entity has no ID");
@@ -4331,7 +4417,6 @@ impl World {
                         let entity =
                             from_type(entity_type, Vector3::new(0.0, 0.0, 0.0), &world, uuid);
                         entity.read_nbt_non_mut(entity_nbt).await;
-                        entity.init_data_tracker().await;
 
                         let base_entity = entity.get_entity();
                         // Clear velocity so the client does not replay the drop
@@ -4339,17 +4424,13 @@ impl World {
                         // stale data.
                         base_entity.velocity.store(Vector3::default());
 
-                        player.client.enqueue_spawn_packet(&entity).await;
-                        player.try_restore_vehicle(&entity).await;
-                        entities_to_add.push(entity);
-                    }
+                        if !world.add_entity_silent(&entity) {
+                            continue;
+                        }
 
-                    if !entities_to_add.is_empty() {
-                        world.entities.rcu(|current_entities| {
-                            let mut new_entities = (**current_entities).clone();
-                            new_entities.extend(entities_to_add.iter().cloned());
-                            new_entities
-                        });
+                        player.client.enqueue_spawn_packet(&entity).await;
+                        entity.init_data_tracker().await;
+                        player.try_restore_vehicle(&entity).await;
                     }
                 } else {
                     // The chunk's entities are already live (another watcher loaded
@@ -4382,17 +4463,7 @@ impl World {
 
     /// Gets an entity by an entity id
     pub fn get_entity_by_id(&self, id: i32) -> Option<Arc<dyn EntityBase>> {
-        for entity in self.entities.load().iter() {
-            if entity.get_entity().entity_id == id {
-                return Some(entity.clone());
-            }
-        }
-        for player in self.players.load().iter() {
-            if player.get_entity().entity_id == id {
-                return Some(player.clone() as Arc<dyn EntityBase>);
-            }
-        }
-        None
+        self.entity_index.get_by_id(id)
     }
 
     /// Gets a `Player` by a username
@@ -4475,11 +4546,26 @@ impl World {
     ///
     /// An `Option<Arc<dyn EntityBase>>` containing the player if found, or `None` if not.
     pub fn get_entity_by_uuid(&self, id: uuid::Uuid) -> Option<Arc<dyn EntityBase>> {
-        self.entities
-            .load()
-            .iter()
-            .find(|p| p.get_entity().entity_uuid == id)
-            .cloned()
+        self.entity_index.get_by_uuid(id)
+    }
+
+    fn scoreboard_name_for_entity(&self, entity: &Entity) -> String {
+        self.get_player_by_uuid(entity.entity_uuid).map_or_else(
+            || entity.entity_uuid.to_string(),
+            |player| player.gameprofile.name.clone(),
+        )
+    }
+
+    pub async fn entities_are_allied(&self, first: &Entity, second: &Entity) -> bool {
+        if first.entity_id == second.entity_id {
+            return true;
+        }
+        let first_name = self.scoreboard_name_for_entity(first);
+        let second_name = self.scoreboard_name_for_entity(second);
+        self.scoreboard
+            .lock()
+            .await
+            .are_allied(&first_name, &second_name)
     }
 
     /// Gets a list of players whose location equals the given position in the world.
@@ -4678,6 +4764,14 @@ impl World {
     ///
     /// * `player`: An `Arc<Player>` reference to the player object.
     pub fn add_player(&self, player: &Arc<Player>) -> Result<(), String> {
+        let entity: Arc<dyn EntityBase> = player.clone();
+        let base_entity = entity.get_entity();
+        self.entity_index
+            .insert(base_entity.entity_id, base_entity.entity_uuid, &entity)
+            .map_err(|error| error.to_string())?;
+        base_entity.removal_reason.store(None);
+        base_entity.removed.store(false, Ordering::Release);
+
         self.players.rcu(|current_list| {
             let mut new_list = (**current_list).clone();
             new_list.push(player.clone());
@@ -4710,6 +4804,16 @@ impl World {
         player: &Arc<Player>,
         fire_event: bool,
     ) -> Option<Arc<Player>> {
+        self.remove_player_with_reason(player, fire_event, RemovalReason::UnloadedWithPlayer)
+            .await
+    }
+
+    pub async fn remove_player_with_reason(
+        &self,
+        player: &Arc<Player>,
+        fire_event: bool,
+        reason: RemovalReason,
+    ) -> Option<Arc<Player>> {
         let mut removed_player: Option<Arc<Player>> = None;
 
         self.players.rcu(|current_list| {
@@ -4726,6 +4830,10 @@ impl World {
         if let Some(ref player) = removed_player {
             let uuid = player.gameprofile.id;
             let entity_id = player.entity_id();
+            let base_entity = player.get_entity();
+            base_entity.removal_reason.store(Some(reason));
+            base_entity.removed.store(true, Ordering::Release);
+            self.entity_index.remove(entity_id, base_entity.entity_uuid);
 
             let bedrock_remove_player = CPlayerList {
                 action: CPlayerList::ACTION_REMOVE,
@@ -4777,19 +4885,16 @@ impl World {
         removed_player
     }
 
-    pub fn spawn_entity_non_save(&self, entity: &Arc<dyn EntityBase>) {
-        let _base_entity = entity.get_entity();
-        self.broadcast_entity_spawn(entity);
-        self.spawn_state.load().add_entity(self, entity.as_ref());
+    pub fn spawn_entity_non_save(&self, entity: &Arc<dyn EntityBase>) -> bool {
+        if !self.add_entity_silent(entity) {
+            return false;
+        }
 
-        self.entities.rcu(|current_entities| {
-            let mut new_entities = (**current_entities).clone();
-            new_entities.push(entity.clone());
-            new_entities
-        });
+        self.broadcast_entity_spawn(entity);
+        true
     }
 
-    pub async fn spawn_entity(self: &Arc<Self>, entity: Arc<dyn EntityBase>) {
+    pub async fn spawn_entity(self: &Arc<Self>, entity: Arc<dyn EntityBase>) -> bool {
         let mut event = crate::plugin::api::events::entity::entity_spawn::EntitySpawnEvent::new(
             entity.get_entity().entity_id,
             entity.get_entity().entity_type.id.to_string(),
@@ -4800,12 +4905,16 @@ impl World {
             server.plugin_manager.fire(&server, &mut event).await;
         }
         if event.cancelled {
-            return;
+            return false;
+        }
+
+        if !self.add_entity_silent(&entity) {
+            return false;
         }
 
         self.broadcast_entity_spawn(&entity);
         entity.init_data_tracker().await;
-        self.add_entity_silent(entity).await;
+        true
     }
 
     pub fn broadcast_entity_spawn(&self, entity: &Arc<dyn EntityBase>) {
@@ -4823,20 +4932,19 @@ impl World {
         }
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn add_entity_silent(&self, entity: Arc<dyn EntityBase>) {
+    pub fn add_entity_silent(&self, entity: &Arc<dyn EntityBase>) -> bool {
         let base_entity = entity.get_entity();
-
-        // Guard against duplicate entities with the same UUID.
-        // This can happen when chunk entity data is loaded while the entity
-        // already exists in the world (e.g. another player is still tracking it).
-        let already_exists = self
-            .entities
-            .load()
-            .iter()
-            .any(|e| e.get_entity().entity_uuid == base_entity.entity_uuid);
-        if already_exists {
-            return;
+        if let Err(error) =
+            self.entity_index
+                .insert(base_entity.entity_id, base_entity.entity_uuid, entity)
+        {
+            warn!(
+                entity_id = base_entity.entity_id,
+                entity_uuid = %base_entity.entity_uuid,
+                %error,
+                "Rejected duplicate live entity"
+            );
+            return false;
         }
 
         // The entity stays live-only: it is written to its chunk's saved data on
@@ -4849,21 +4957,26 @@ impl World {
             new_entities.push(entity.clone());
             new_entities
         });
+        true
     }
 
     #[allow(clippy::unused_async)]
     pub async fn remove_entity(&self, entity: &dyn EntityBase) {
+        self.remove_entity_with_reason(entity, RemovalReason::Discarded)
+            .await;
+    }
+
+    #[allow(clippy::unused_async)]
+    pub async fn remove_entity_with_reason(&self, entity: &dyn EntityBase, reason: RemovalReason) {
         let base_entity = entity.get_entity();
-        if base_entity
-            .removal_reason
-            .swap(Some(RemovalReason::Discarded))
-            .is_some()
-        {
+        if base_entity.removal_reason.swap(Some(reason)).is_some() {
             return;
         }
         base_entity.removed.store(true, Ordering::Release);
 
         self.spawn_state.load().remove_entity(self, entity);
+        self.entity_index
+            .remove(base_entity.entity_id, base_entity.entity_uuid);
         self.entities.rcu(|current_entities| {
             let mut new_entities = (**current_entities).clone();
             new_entities.retain(|e| e.get_entity().entity_uuid != base_entity.entity_uuid);
@@ -4882,7 +4995,28 @@ impl World {
         &self,
         chunks: impl IntoIterator<Item = impl std::borrow::Borrow<Vector2<i32>>>,
     ) {
-        let chunks_set: FxHashSet<_> = chunks.into_iter().map(|c| *c.borrow()).collect();
+        let mut chunks_set: FxHashSet<_> = chunks.into_iter().map(|c| *c.borrow()).collect();
+        if chunks_set.is_empty() {
+            return;
+        }
+
+        let mut entity_counts = FxHashMap::<Vector2<i32>, usize>::default();
+        for entity in self.entities.load().iter() {
+            let chunk_pos = entity.get_entity().chunk_pos.load();
+            if chunks_set.contains(&chunk_pos) {
+                *entity_counts.entry(chunk_pos).or_default() += 1;
+            }
+        }
+        let mut cancelled_chunks = Vec::new();
+        for chunk_pos in &chunks_set {
+            let count = entity_counts.get(chunk_pos).copied().unwrap_or(0);
+            if !self.unload_entities(*chunk_pos, count).await {
+                cancelled_chunks.push(*chunk_pos);
+            }
+        }
+        for chunk_pos in cancelled_chunks {
+            chunks_set.remove(&chunk_pos);
+        }
         if chunks_set.is_empty() {
             return;
         }
@@ -4903,14 +5037,32 @@ impl World {
             new_entities
         });
 
+        self.save_entity_snapshots(&entities_to_remove, chunks_set.iter().copied())
+            .await;
+
         for entity in entities_to_remove {
-            self.save_entity(&entity).await;
+            let base_entity = entity.get_entity();
+            if base_entity
+                .removal_reason
+                .swap(Some(RemovalReason::UnloadedToChunk))
+                .is_some()
+            {
+                continue;
+            }
+            base_entity.removed.store(true, Ordering::Release);
             self.spawn_state.load().remove_entity(self, entity.as_ref());
+            self.entity_index
+                .remove(base_entity.entity_id, base_entity.entity_uuid);
         }
 
         for chunk_pos in &chunks_set {
             self.save_block_entities(chunk_pos).await;
-            self.block_entities.remove(chunk_pos);
+            if let Some((_, block_entities)) = self.block_entities.remove(chunk_pos) {
+                for position in block_entities.keys() {
+                    self.custom_block_entity_data.remove(position);
+                    self.block_entity_residual_data.remove(position);
+                }
+            }
         }
     }
 
@@ -5848,7 +6000,26 @@ impl World {
             self.custom_block_entity_data
                 .insert(*block_pos, custom_data.clone());
         }
+        let residual = pumpkin_world::persistence::bounded_residual_nbt(
+            &nbt,
+            ["id", "x", "y", "z", "PumpkinCustomData", "BukkitValues"],
+            MAX_BLOCK_ENTITY_RESIDUAL_ENTRIES,
+            MAX_BLOCK_ENTITY_RESIDUAL_BYTES,
+        )
+        .inspect_err(|message| {
+            warn!(
+                position = ?block_pos,
+                %message,
+                "Discarding oversized block-entity residual NBT"
+            );
+        })
+        .unwrap_or_default();
         let entity = block_entity_from_nbt(&nbt)?;
+        if residual.is_empty() {
+            self.block_entity_residual_data.remove(block_pos);
+        } else {
+            self.block_entity_residual_data.insert(*block_pos, residual);
+        }
         self.block_entities
             .entry(chunk_pos)
             .or_default()
@@ -5920,14 +6091,15 @@ impl World {
         let block_entity_nbt = block_entity.chunk_data_nbt();
         let entity_id = block_entity.resource_location().to_string();
 
-        if let Some(nbt) = &block_entity_nbt {
-            let bytes = pumpkin_nbt::Nbt::from(nbt.clone()).write_unnamed();
+        if let Some(nbt) = &block_entity_nbt
+            && let Some(bytes) = serialize_unnamed_nbt(nbt.clone(), "new block entity")
+        {
             self.broadcast_to_chunk(
                 chunk_pos,
                 &CBlockEntityData::new(
                     block_entity.get_position(),
                     VarInt(block_entity.get_id() as i32),
-                    bytes.as_ref().into(),
+                    bytes,
                 ),
             );
         }
@@ -5973,6 +6145,7 @@ impl World {
                 });
         if removed {
             self.custom_block_entity_data.remove(block_pos);
+            self.block_entity_residual_data.remove(block_pos);
             // Drop the chunk's map once its last block entity is gone.
             self.block_entities
                 .remove_if(&chunk_pos, |_, entities| entities.is_empty());
@@ -6012,15 +6185,16 @@ impl World {
         let block_entity_nbt = block_entity.chunk_data_nbt();
 
         if let Some(nbt) = &block_entity_nbt {
-            let bytes = pumpkin_nbt::Nbt::from(nbt.clone()).write_unnamed();
-            self.broadcast_to_chunk(
-                chunk_pos,
-                &CBlockEntityData::new(
-                    block_entity.get_position(),
-                    VarInt(block_entity.get_id() as i32),
-                    bytes.as_ref().into(),
-                ),
-            );
+            if let Some(bytes) = serialize_unnamed_nbt(nbt.clone(), "block entity update") {
+                self.broadcast_to_chunk(
+                    chunk_pos,
+                    &CBlockEntityData::new(
+                        block_entity.get_position(),
+                        VarInt(block_entity.get_id() as i32),
+                        bytes,
+                    ),
+                );
+            }
             let mut full_nbt = nbt.clone();
             full_nbt.put_string("id", block_entity.resource_location().to_string());
             let pos = block_entity.get_position();
@@ -6475,6 +6649,22 @@ impl World {
         Self::broadcast_java_grouped(packet, recipients_by_version);
     }
 
+    pub(crate) fn broadcast_state_to_chunk<P: ClientPacket>(
+        &self,
+        chunk_pos: Vector2<i32>,
+        kind: crate::net::StatePacketKind,
+        packet: &P,
+    ) {
+        let players = self.players.load();
+        let recipients = players.iter().filter(|player| {
+            let center = player.get_entity().chunk_pos.load();
+            let view_distance = get_view_distance(player).get() as i32;
+            is_within_view_distance(chunk_pos, center, view_distance)
+        });
+        let recipients_by_version = Self::collect_java_recipients_by_version(recipients);
+        Self::broadcast_java_state_grouped(packet, kind, recipients_by_version);
+    }
+
     pub fn broadcast_to_chunk_bedrock<P: BClientPacket>(
         &self,
         chunk_pos: Vector2<i32>,
@@ -6523,6 +6713,33 @@ impl World {
         Self::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
     }
 
+    pub(crate) fn broadcast_state_to_chunk_editioned_sync<J: ClientPacket, B: BClientPacket>(
+        &self,
+        chunk_pos: Vector2<i32>,
+        kind: crate::net::StatePacketKind,
+        je_packet: &J,
+        be_packet: &B,
+    ) {
+        let players = self.players.load();
+        let mut java_recipients = Vec::new();
+        let mut bedrock_recipients = Vec::new();
+        for player in players.iter().filter(|player| {
+            let center = player.get_entity().chunk_pos.load();
+            let view_distance = get_view_distance(player).get() as i32;
+            is_within_view_distance(chunk_pos, center, view_distance)
+        }) {
+            match player.client.as_ref() {
+                ClientPlatform::Java(_) => java_recipients.push(player),
+                ClientPlatform::Bedrock(client) => bedrock_recipients.push(client),
+            }
+        }
+
+        let recipients_by_version =
+            Self::collect_java_recipients_by_version(java_recipients.into_iter());
+        Self::broadcast_java_state_grouped(je_packet, kind, recipients_by_version);
+        Self::broadcast_bedrock_state_grouped(be_packet, kind, bedrock_recipients.into_iter());
+    }
+
     /// Broadcasts a packet to chunk watchers, excluding specific players.
     pub fn broadcast_to_chunk_except<P: ClientPacket>(
         &self,
@@ -6544,6 +6761,26 @@ impl World {
 
         let recipients_by_version = Self::collect_java_recipients_by_version(recipients);
         Self::broadcast_java_grouped(packet, recipients_by_version);
+    }
+
+    pub(crate) fn broadcast_state_to_chunk_except<P: ClientPacket>(
+        &self,
+        chunk_pos: Vector2<i32>,
+        except: &[uuid::Uuid],
+        kind: crate::net::StatePacketKind,
+        packet: &P,
+    ) {
+        let players = self.players.load();
+        let recipients = players.iter().filter(|player| {
+            !except.contains(&player.get_entity().entity_uuid)
+                && is_within_view_distance(
+                    chunk_pos,
+                    player.get_entity().chunk_pos.load(),
+                    get_view_distance(player).get() as i32,
+                )
+        });
+        let recipients_by_version = Self::collect_java_recipients_by_version(recipients);
+        Self::broadcast_java_state_grouped(packet, kind, recipients_by_version);
     }
 
     pub async fn broadcast_to_chunk_except_editioned<J: ClientPacket, B: BClientPacket>(
@@ -6598,10 +6835,10 @@ impl World {
         }
     }
 
-    pub async fn save(&self) {
-        for entity in self.entities.load().iter() {
-            self.save_entity(entity).await;
-        }
+    pub async fn save(&self) -> Result<(), String> {
+        let entities = self.entities.load_full();
+        self.save_entity_snapshots(&entities, self.level.loaded_entity_chunk_positions())
+            .await;
 
         let chunks: Vec<Vector2<i32>> = self
             .block_entities
@@ -6612,30 +6849,42 @@ impl World {
             self.save_block_entities(&chunk_pos).await;
         }
 
-        if let Ok(mut portal_poi) = self.portal_poi.try_lock() {
-            let _ = portal_poi.save_all();
-        }
-
-        {
+        let custom_data = {
             let custom_data = self
                 .custom_data
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !custom_data.is_empty() {
-                let custom_data_path = self
-                    .level
-                    .level_folder
-                    .root_folder
-                    .join("pumpkin_custom_data.nbt");
-                let nbt = pumpkin_nbt::Nbt::from(custom_data.clone());
-                let _ = std::fs::write(custom_data_path, nbt.write());
-            }
-        }
-
-        self.level
-            .should_save
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.level.level_channel.notify();
+            (!custom_data.is_empty()).then(|| custom_data.clone())
+        };
+        let custom_data_path = self
+            .level
+            .level_folder
+            .root_folder
+            .join("pumpkin_custom_data.nbt");
+        complete_world_save_transaction(
+            async {
+                self.portal_poi
+                    .lock()
+                    .await
+                    .save_all()
+                    .await
+                    .map_err(|error| format!("failed to save portal POI: {error}"))
+            },
+            async move {
+                let Some(custom_data) = custom_data else {
+                    return Ok(());
+                };
+                pumpkin_world::persistence::atomic_write(&custom_data_path, |file| {
+                    pumpkin_nbt::Nbt::from(custom_data)
+                        .write_to_writer(file)
+                        .map_err(std::io::Error::other)
+                })
+                .map_err(|error| format!("failed to save world custom data: {error}"))
+            },
+            self.level.save_chunks_durable(),
+            self.level.save_entity_chunks_durable(),
+        )
+        .await?;
 
         let mut save_event = crate::plugin::api::events::world::world_save::WorldSaveEvent::new(
             format!("{:?}", self.dimension),
@@ -6643,6 +6892,7 @@ impl World {
         if let Some(server) = self.server.upgrade() {
             server.plugin_manager.fire(&server, &mut save_event).await;
         }
+        Ok(())
     }
 
     pub fn set_custom_data(&self, namespace: &str, key: &str, value: pumpkin_nbt::tag::NbtTag) {
@@ -6784,7 +7034,7 @@ impl World {
         }
     }
 
-    pub async fn load_entities(&self, chunk_pos: Vector2<i32>, entity_count: usize) {
+    pub async fn load_entities(&self, chunk_pos: Vector2<i32>, entity_count: usize) -> bool {
         let mut load_event =
             crate::plugin::api::events::world::entities_load::EntitiesLoadEvent::new(
                 chunk_pos,
@@ -6793,9 +7043,10 @@ impl World {
         if let Some(server) = self.server.upgrade() {
             server.plugin_manager.fire(&server, &mut load_event).await;
         }
+        !load_event.cancelled
     }
 
-    pub async fn unload_entities(&self, chunk_pos: Vector2<i32>, entity_count: usize) {
+    pub async fn unload_entities(&self, chunk_pos: Vector2<i32>, entity_count: usize) -> bool {
         let mut unload_event =
             crate::plugin::api::events::world::entities_unload::EntitiesUnloadEvent::new(
                 chunk_pos,
@@ -6804,6 +7055,7 @@ impl World {
         if let Some(server) = self.server.upgrade() {
             server.plugin_manager.fire(&server, &mut unload_event).await;
         }
+        !unload_event.cancelled
     }
 
     pub async fn generate_loot(&self, loot_table: String) {
@@ -7000,7 +7252,10 @@ mod tests {
     };
     use pumpkin_util::math::position::BlockPos;
 
-    use super::{bedrock_block_breaking_rate, bedrock_chest_block_actor};
+    use super::{
+        bedrock_block_breaking_rate, bedrock_chest_block_actor, complete_world_save_transaction,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn bedrock_block_breaking_rate_uses_progress_per_tick() {
@@ -7059,5 +7314,44 @@ mod tests {
             GameRuleValue::Int(v) => assert_eq!(*v, 20),
             GameRuleValue::Bool(_) => panic!("expected int"),
         }
+    }
+
+    #[tokio::test]
+    async fn save_transaction_propagates_partial_failure_and_can_retry() {
+        let terrain_attempts = AtomicUsize::new(0);
+        let entity_attempts = AtomicUsize::new(0);
+        let first = complete_world_save_transaction(
+            async { Ok(()) },
+            async { Err("custom data failed".to_owned()) },
+            async {
+                terrain_attempts.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+            async {
+                entity_attempts.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(first.unwrap_err(), "custom data failed");
+        assert_eq!(terrain_attempts.load(Ordering::Relaxed), 0);
+        assert_eq!(entity_attempts.load(Ordering::Relaxed), 0);
+
+        complete_world_save_transaction(
+            async { Ok(()) },
+            async { Ok(()) },
+            async {
+                terrain_attempts.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+            async {
+                entity_attempts.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .await
+        .expect("retry should run every durable leg and succeed");
+        assert_eq!(terrain_attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(entity_attempts.load(Ordering::Relaxed), 1);
     }
 }

@@ -13,7 +13,8 @@ use rand::RngExt;
 
 use crate::{
     entity::{
-        Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity, player::Player,
+        DamageContext, Entity, EntityBase, EntityBaseFuture, NbtFuture, living::LivingEntity,
+        player::Player,
     },
     server::Server,
 };
@@ -113,7 +114,7 @@ impl MinecartEntity {
 }
 
 impl EntityBase for MinecartEntity {
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
+    fn write_custom_nbt_async<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
             match &self.kind {
                 MinecartKind::Chest(minecart) => minecart.write_nbt(nbt).await,
@@ -672,14 +673,14 @@ impl EntityBase for MinecartEntity {
 
     fn damage_with_context<'a>(
         &'a self,
-        _caller: &'a dyn EntityBase,
-        amount: f32,
-        damage_type: DamageType,
-        _position: Option<Vector3<f64>>,
-        source: Option<&'a dyn EntityBase>,
-        cause: Option<&'a dyn EntityBase>,
+        _target: &'a dyn EntityBase,
+        context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
+            let amount = context.amount();
+            let damage_type = context.damage_type();
+            let source = context.direct_entity();
+            let cause = context.causing_entity();
             let creative = source
                 .and_then(EntityBase::get_player)
                 .is_some_and(|player| player.gamemode.load() == GameMode::Creative);

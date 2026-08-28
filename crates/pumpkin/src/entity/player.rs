@@ -17,6 +17,7 @@ use arc_swap::ArcSwap;
 use crossbeam::atomic::AtomicCell;
 use crossbeam::channel::Receiver;
 use pumpkin_data::dimension::Dimension;
+use pumpkin_inventory::entity_equipment::EntityEquipment;
 use pumpkin_inventory::merchant::merchant_screen_handler::MerchantScreenHandler;
 use pumpkin_inventory::player::ender_chest_inventory::EnderChestInventory;
 use pumpkin_protocol::bedrock::client::play_status::CPlayStatus;
@@ -37,7 +38,7 @@ use pumpkin_world::chunk::{ChunkData, ChunkEntityData};
 use pumpkin_world::inventory::Inventory;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
@@ -266,7 +267,7 @@ use crate::command::context::command_source::CommandSource;
 use crate::command::node::dispatcher::CommandDispatcher;
 use crate::command::{CommandSender, client_suggestions};
 use crate::data::SaveJSONConfiguration;
-use crate::entity::{EntityBaseFuture, NbtFuture, TeleportFuture};
+use crate::entity::{DamageContext, EntityBaseFuture, NbtFuture, TeleportFuture};
 use crate::net::{ClientPlatform, GameProfile};
 use crate::net::{DisconnectReason, PlayerConfig};
 use crate::plugin::player::exp_change::PlayerExpChangeEvent;
@@ -285,7 +286,7 @@ use super::combat::{self, AttackType, player_attack_sound};
 use super::hunger::HungerManager;
 use super::item::ItemEntity;
 use super::living::LivingEntity;
-use super::{Entity, EntityBase, NBTStorage, NBTStorageInit};
+use super::{Entity, EntityBase, NBTStorage, NBTStorageInit, RemovalReason};
 use pumpkin_data::potion::Effect;
 use pumpkin_world::chunk_system::ChunkLoading;
 const MAX_CACHED_SIGNATURES: u8 = 128; // Vanilla: 128
@@ -1452,15 +1453,16 @@ impl Player {
         if !victim
             .damage_with_context(
                 &*victim,
-                damage as f32,
-                if is_mace_smash {
-                    DamageType::MACE_SMASH
-                } else {
-                    DamageType::PLAYER_ATTACK
-                },
-                None,
-                Some(self),
-                Some(self),
+                DamageContext::new(
+                    damage as f32,
+                    if is_mace_smash {
+                        DamageType::MACE_SMASH
+                    } else {
+                        DamageType::PLAYER_ATTACK
+                    },
+                )
+                .with_direct_entity(self)
+                .with_causing_entity(self),
             )
             .await
         {
@@ -1542,11 +1544,9 @@ impl Player {
                             other_victim
                                 .damage_with_context(
                                     other_victim.as_ref(),
-                                    sweep_damage,
-                                    DamageType::PLAYER_ATTACK,
-                                    None,
-                                    Some(self),
-                                    Some(self),
+                                    DamageContext::new(sweep_damage, DamageType::PLAYER_ATTACK)
+                                        .with_direct_entity(self)
+                                        .with_causing_entity(self),
                                 )
                                 .await;
                         }
@@ -2676,7 +2676,8 @@ impl Player {
         struct RawPacket;
 
         let mut event = PacketSentEvent::new(self.clone(), packet_id, payload, Arc::new(RawPacket));
-        if let Some(server) = self.world().server.upgrade() {
+        let server = self.world().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut event).await;
         }
         event
@@ -3379,18 +3380,20 @@ impl Player {
                 let new_world = event.new_world;
 
                 self.set_client_loaded(false);
-                let Some(player) = current_world.remove_player(self, false).await else {
+                let Some(player) = current_world
+                    .remove_player_with_reason(self, false, RemovalReason::ChangedDimension)
+                    .await
+                else {
                     return;
                 };
-               new_world.players.rcu(|current_list| {
-                    let mut new_list = (**current_list).clone();
-                    new_list.push(player.clone());
-                    new_list
-                });
                 self.unload_watched_chunks(&current_world).await;
 
                 self.chunk_manager.lock().await.change_world(&current_world.level, new_world.clone());
                 self.living_entity.entity.set_world(new_world.clone());
+                if let Err(error) = new_world.add_player(&player) {
+                    error!(%error, "Failed to index player in destination world");
+                    return;
+                }
 
                 if new_world.dimension == pumpkin_data::dimension::Dimension::THE_NETHER {
                     self.trigger_advancement(crate::entity::player::advancement::trigger::AdvancementTrigger::EnterDimension {
@@ -3642,7 +3645,8 @@ impl Player {
                 self.entity_id(),
                 exhaustion,
             );
-        if let Some(server) = self.world().server.upgrade() {
+        let server = self.world().server.upgrade();
+        if let Some(server) = server {
             server
                 .plugin_manager
                 .fire(&server, &mut exhaustion_event)
@@ -3840,7 +3844,8 @@ impl Player {
                 self.living_entity.entity.entity_id,
                 food_level,
             );
-        if let Some(server) = self.world().server.upgrade() {
+        let server = self.world().server.upgrade();
+        if let Some(server) = server {
             server.plugin_manager.fire(&server, &mut food_event).await;
         }
         if food_event.cancelled {
@@ -4064,6 +4069,16 @@ impl Player {
 
         // Reset air supply & drowning ticks on death
         self.breath_manager.reset(self);
+
+        let entities = self.world().entities.load_full();
+        for entity in entities.iter() {
+            if let Some(neutral) = entity
+                .get_mob()
+                .and_then(crate::entity::mob::Mob::as_neutral)
+            {
+                neutral.player_died(self.gameprofile.id).await;
+            }
+        }
 
         if matches!(self.client.as_ref(), ClientPlatform::Java(_)) {
             self.set_client_loaded(false);
@@ -4880,7 +4895,8 @@ impl Player {
                 packet.item_name.to_string(),
                 1,
             );
-        if let Some(server) = self.world().server.upgrade() {
+        let server = self.world().server.upgrade();
+        if let Some(server) = server {
             server
                 .plugin_manager
                 .fire(&server, &mut prepare_event)
@@ -5177,7 +5193,8 @@ impl Player {
             crate::plugin::api::events::inventory::inventory_interact::InventoryInteractEvent::new(
                 self.clone(),
             );
-        if let Some(server) = self.world().server.upgrade() {
+        let server = self.world().server.upgrade();
+        if let Some(server) = server {
             server
                 .plugin_manager
                 .fire(&server, &mut interact_event)
@@ -5202,7 +5219,8 @@ impl Player {
                     self.clone(),
                     stack.item.registry_key.to_string(),
                 );
-            if let Some(server) = self.world().server.upgrade() {
+            let server = self.world().server.upgrade();
+            if let Some(server) = server {
                 server.plugin_manager.fire(&server, &mut craft_event).await;
                 server.plugin_manager.fire(&server, &mut prep_craft).await;
             }
@@ -5227,7 +5245,8 @@ impl Player {
                     self.clone(),
                     Some(stack.item.registry_key.to_string()),
                 );
-            if let Some(server) = self.world().server.upgrade() {
+            let server = self.world().server.upgrade();
+            if let Some(server) = server {
                 server.plugin_manager.fire(&server, &mut smith_event).await;
                 server.plugin_manager.fire(&server, &mut prep_smith).await;
             }
@@ -5252,7 +5271,8 @@ impl Player {
                     stack.item_count as u32,
                     0.0,
                 );
-            if let Some(server) = self.world().server.upgrade() {
+            let server = self.world().server.upgrade();
+            if let Some(server) = server {
                 server
                     .plugin_manager
                     .fire(&server, &mut extract_event)
@@ -5268,7 +5288,8 @@ impl Player {
                     self.clone(),
                     if stack.is_empty() { None } else { Some(stack.item.registry_key.to_string()) },
                 );
-            if let Some(server) = self.world().server.upgrade() {
+            let server = self.world().server.upgrade();
+            if let Some(server) = server {
                 server
                     .plugin_manager
                     .fire(&server, &mut prep_grindstone)
@@ -5282,7 +5303,8 @@ impl Player {
                     self.clone(),
                     if stack.is_empty() { None } else { Some(stack.item.registry_key.to_string()) },
                 );
-            if let Some(server) = self.world().server.upgrade() {
+            let server = self.world().server.upgrade();
+            if let Some(server) = server {
                 server.plugin_manager.fire(&server, &mut prep_result).await;
             }
         }
@@ -5292,7 +5314,8 @@ impl Player {
                 crate::plugin::api::events::inventory::inventory_drag::InventoryDragEvent::new(
                     self.clone(),
                 );
-            if let Some(server) = self.world().server.upgrade() {
+            let server = self.world().server.upgrade();
+            if let Some(server) = server {
                 server.plugin_manager.fire(&server, &mut drag_event).await;
             }
             if drag_event.cancelled {
@@ -5665,63 +5688,101 @@ impl PartialEq for Player {
     }
 }
 
+#[derive(Clone)]
+struct PlayerInventorySaveSnapshot {
+    selected_slot: u8,
+    main_inventory: [ItemStack; PlayerInventory::MAIN_SIZE],
+    equipment: EntityEquipment,
+}
+
+impl PlayerInventorySaveSnapshot {
+    fn write_nbt(&self, nbt: &mut NbtCompound) {
+        nbt.put_int("SelectedItemSlot", i32::from(self.selected_slot));
+
+        let mut items = Vec::with_capacity(41);
+        for (index, stack) in self.main_inventory.iter().enumerate() {
+            if stack.is_empty() {
+                continue;
+            }
+            let mut item_compound = NbtCompound::new();
+            item_compound.put_byte("Slot", index as i8);
+            stack.write_item_stack(&mut item_compound);
+            items.push(NbtTag::Compound(item_compound));
+        }
+
+        let mut equipment_compound = NbtCompound::new();
+        for (slot, stack) in &self.equipment.equipment {
+            if stack.is_empty() {
+                continue;
+            }
+            let mut item_compound = NbtCompound::new();
+            stack.write_item_stack(&mut item_compound);
+            let vanilla_slot = match slot {
+                EquipmentSlot::Feet(_) => {
+                    equipment_compound.put_compound("feet", item_compound.clone());
+                    Some(100i8)
+                }
+                EquipmentSlot::Legs(_) => {
+                    equipment_compound.put_compound("legs", item_compound.clone());
+                    Some(101i8)
+                }
+                EquipmentSlot::Chest(_) => {
+                    equipment_compound.put_compound("chest", item_compound.clone());
+                    Some(102i8)
+                }
+                EquipmentSlot::Head(_) => {
+                    equipment_compound.put_compound("head", item_compound.clone());
+                    Some(103i8)
+                }
+                EquipmentSlot::OffHand(_) => {
+                    equipment_compound.put_compound("offhand", item_compound.clone());
+                    Some(-106i8)
+                }
+                _ => None,
+            };
+            if let Some(slot_byte) = vanilla_slot {
+                let mut inventory_item = NbtCompound::new();
+                inventory_item.put_byte("Slot", slot_byte);
+                stack.write_item_stack(&mut inventory_item);
+                items.push(NbtTag::Compound(inventory_item));
+            }
+        }
+
+        nbt.put_compound("equipment", equipment_compound);
+        nbt.put("Inventory", NbtTag::List(items));
+    }
+}
+
+#[derive(Clone)]
+struct EnderChestSaveSnapshot {
+    items: [ItemStack; EnderChestInventory::INVENTORY_SIZE],
+}
+
+impl EnderChestSaveSnapshot {
+    fn write_nbt(&self, nbt: &mut NbtCompound) {
+        let mut items = Vec::with_capacity(EnderChestInventory::INVENTORY_SIZE);
+        for (index, stack) in self.items.iter().enumerate() {
+            if stack.is_empty() {
+                continue;
+            }
+            let mut item_compound = NbtCompound::new();
+            item_compound.put_byte("Slot", index as i8);
+            stack.write_item_stack(&mut item_compound);
+            items.push(NbtTag::Compound(item_compound));
+        }
+        nbt.put("EnderItems", NbtTag::List(items));
+    }
+}
+
 impl NBTStorage for PlayerInventory {
     fn write_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
-            // Save the selected slot (hotbar)
-            nbt.put_int("SelectedItemSlot", i32::from(self.get_selected_slot()));
-
-            // Create inventory list with the correct capacity (inventory size)
-            let mut items: Vec<NbtTag> = Vec::with_capacity(41);
-            let main_inv = self.main_inventory.read().await;
-            for (i, stack) in main_inv.iter().enumerate() {
-                if !stack.is_empty() {
-                    let mut item_compound = NbtCompound::new();
-                    item_compound.put_byte("Slot", i as i8);
-                    stack.write_item_stack(&mut item_compound);
-                    items.push(NbtTag::Compound(item_compound));
-                }
-            }
-
-            let mut equipment_compound = NbtCompound::new();
-            let equipment_guard = self.entity_equipment.lock().await;
-            for (slot, stack) in &equipment_guard.equipment {
-                if !stack.is_empty() {
-                    let mut item_compound = NbtCompound::new();
-                    stack.write_item_stack(&mut item_compound);
-                    let vanilla_slot = match slot {
-                        EquipmentSlot::Feet(_) => {
-                            equipment_compound.put_compound("feet", item_compound.clone());
-                            Some(100i8)
-                        }
-                        EquipmentSlot::Legs(_) => {
-                            equipment_compound.put_compound("legs", item_compound.clone());
-                            Some(101i8)
-                        }
-                        EquipmentSlot::Chest(_) => {
-                            equipment_compound.put_compound("chest", item_compound.clone());
-                            Some(102i8)
-                        }
-                        EquipmentSlot::Head(_) => {
-                            equipment_compound.put_compound("head", item_compound.clone());
-                            Some(103i8)
-                        }
-                        EquipmentSlot::OffHand(_) => {
-                            equipment_compound.put_compound("offhand", item_compound.clone());
-                            Some(-106i8)
-                        }
-                        _ => None,
-                    };
-                    if let Some(slot_byte) = vanilla_slot {
-                        let mut inv_item_compound = NbtCompound::new();
-                        inv_item_compound.put_byte("Slot", slot_byte);
-                        stack.write_item_stack(&mut inv_item_compound);
-                        items.push(NbtTag::Compound(inv_item_compound));
-                    }
-                }
-            }
-            nbt.put_compound("equipment", equipment_compound);
-            nbt.put("Inventory", NbtTag::List(items));
+            let snapshot = PlayerInventorySaveSnapshot {
+                selected_slot: self.get_selected_slot(),
+                main_inventory: self.main_inventory.read().await.clone(),
+                equipment: self.entity_equipment.lock().await.clone(),
+            };
+            snapshot.write_nbt(nbt);
         })
     }
 
@@ -5791,19 +5852,10 @@ impl NBTStorageInit for PlayerInventory {}
 impl NBTStorage for EnderChestInventory {
     fn write_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async {
-            // Create item list with the correct capacity (inventory size)
-            let mut items: Vec<NbtTag> = Vec::with_capacity(Self::INVENTORY_SIZE);
-            let ec_items = self.items.read().await;
-            for (i, stack) in ec_items.iter().enumerate() {
-                if !stack.is_empty() {
-                    let mut item_compound = NbtCompound::new();
-                    item_compound.put_byte("Slot", i as i8);
-                    stack.write_item_stack(&mut item_compound);
-                    items.push(NbtTag::Compound(item_compound));
-                }
+            EnderChestSaveSnapshot {
+                items: self.items.read().await.clone(),
             }
-
-            nbt.put("EnderItems", NbtTag::List(items));
+            .write_nbt(nbt);
         })
     }
 
@@ -5829,17 +5881,226 @@ impl NBTStorage for EnderChestInventory {
 
 impl NBTStorageInit for EnderChestInventory {}
 
+#[derive(Clone, Copy)]
+struct HungerSaveSnapshot {
+    level: u8,
+    saturation: f32,
+    exhaustion: f32,
+    tick_timer: u32,
+}
+
+impl HungerSaveSnapshot {
+    fn write_nbt(self, nbt: &mut NbtCompound) {
+        nbt.put_int("foodLevel", self.level.into());
+        nbt.put_float("foodSaturationLevel", self.saturation);
+        nbt.put_float("foodExhaustionLevel", self.exhaustion);
+        nbt.put_int("foodTickTimer", self.tick_timer as i32);
+    }
+}
+
+struct PlayerOwnedSaveSnapshot {
+    inventory: PlayerInventorySaveSnapshot,
+    ender_chest: EnderChestSaveSnapshot,
+    abilities: Abilities,
+    respawn_point: Option<RespawnPoint>,
+    vehicle_uuid: Option<Uuid>,
+    statistics: statistics::Statistics,
+}
+
+struct PlayerOwnedSaveSnapshotSources<'a, V> {
+    inventory: &'a PlayerInventory,
+    ender_chest_inventory: &'a EnderChestInventory,
+    abilities: &'a Mutex<Abilities>,
+    respawn_point: &'a Mutex<Option<RespawnPoint>>,
+    vehicle: &'a Mutex<V>,
+    statistics: &'a Mutex<statistics::Statistics>,
+}
+
+async fn capture_player_owned_save_snapshot<V>(
+    sources: PlayerOwnedSaveSnapshotSources<'_, V>,
+    vehicle_uuid: impl FnOnce(&V) -> Option<Uuid>,
+    root_vehicle_uuid: impl FnOnce() -> Option<Uuid>,
+) -> PlayerOwnedSaveSnapshot {
+    // Canonical player-save lock order. No NBT construction or unrelated await
+    // is allowed while these guards are held.
+    let main_inventory = sources.inventory.main_inventory.read().await;
+    let equipment = sources.inventory.entity_equipment.lock().await;
+    let ender_chest = sources.ender_chest_inventory.items.read().await;
+    let abilities = sources.abilities.lock().await;
+    let respawn_point = sources.respawn_point.lock().await;
+    let vehicle = sources.vehicle.lock().await;
+    let statistics = sources.statistics.lock().await;
+
+    PlayerOwnedSaveSnapshot {
+        inventory: PlayerInventorySaveSnapshot {
+            selected_slot: sources.inventory.get_selected_slot(),
+            main_inventory: main_inventory.clone(),
+            equipment: equipment.clone(),
+        },
+        ender_chest: EnderChestSaveSnapshot {
+            items: ender_chest.clone(),
+        },
+        abilities: abilities.clone(),
+        respawn_point: respawn_point.clone(),
+        vehicle_uuid: vehicle_uuid(&vehicle).or_else(root_vehicle_uuid),
+        statistics: statistics.clone(),
+    }
+}
+
+struct PlayerSaveSnapshot {
+    inventory: PlayerInventorySaveSnapshot,
+    ender_chest: EnderChestSaveSnapshot,
+    abilities: Abilities,
+    experience_progress: f32,
+    experience_level: i32,
+    experience_total: i32,
+    enchantment_seed: i32,
+    score: i32,
+    sleeping_since: i16,
+    gamemode: GameMode,
+    previous_gamemode: Option<GameMode>,
+    seen_credits: bool,
+    spawn_extra_particles_on_fall: bool,
+    has_played_before: bool,
+    hunger: HungerSaveSnapshot,
+    air_supply: i32,
+    drowning_tick: i32,
+    dimension: Arc<str>,
+    respawn_point: Option<RespawnPoint>,
+    vehicle_uuid: Option<Uuid>,
+    statistics: statistics::Statistics,
+}
+
+impl PlayerSaveSnapshot {
+    fn write_nbt(&self, nbt: &mut NbtCompound) {
+        nbt.put_int("DataVersion", DATA_VERSION);
+        self.inventory.write_nbt(nbt);
+        self.ender_chest.write_nbt(nbt);
+        self.abilities.write_snapshot_nbt(nbt);
+
+        nbt.put_float("XpP", self.experience_progress);
+        nbt.put_int("XpLevel", self.experience_level);
+        nbt.put_int("XpTotal", self.experience_total);
+        nbt.put_int("XpSeed", self.enchantment_seed);
+        nbt.put_int("Score", self.score);
+        nbt.put_short("SleepTimer", self.sleeping_since);
+        nbt.put_int("playerGameType", self.gamemode as i32);
+        if let Some(previous_gamemode) = self.previous_gamemode {
+            nbt.put_int("previousPlayerGameType", previous_gamemode as i32);
+        }
+        nbt.put_bool("seenCredits", self.seen_credits);
+        nbt.put_bool(
+            "spawn_extra_particles_on_fall",
+            self.spawn_extra_particles_on_fall,
+        );
+        nbt.put_bool("HasPlayedBefore", self.has_played_before);
+        self.hunger.write_nbt(nbt);
+
+        nbt.put_short("Air", self.air_supply as i16);
+        nbt.put_int("AirSupply", self.air_supply);
+        nbt.put_int("DrowningTick", self.drowning_tick);
+        nbt.put_string("Dimension", self.dimension.clone());
+
+        if let Some(respawn) = &self.respawn_point {
+            nbt.put_int("SpawnX", respawn.position.0.x);
+            nbt.put_int("SpawnY", respawn.position.0.y);
+            nbt.put_int("SpawnZ", respawn.position.0.z);
+            nbt.put_string("SpawnDimension", respawn.dimension.minecraft_name);
+            nbt.put_bool("SpawnForced", respawn.force);
+
+            let mut respawn_compound = NbtCompound::new();
+            respawn_compound.put_string("dimension", respawn.dimension.minecraft_name);
+            respawn_compound.put(
+                "pos",
+                NbtTag::IntArray(vec![
+                    respawn.position.0.x,
+                    respawn.position.0.y,
+                    respawn.position.0.z,
+                ]),
+            );
+            respawn_compound.put_float("angle", respawn.yaw);
+            respawn_compound.put_bool("forced", respawn.force);
+            nbt.put_compound("respawn", respawn_compound);
+        }
+        if let Some(vehicle_uuid) = self.vehicle_uuid {
+            write_root_vehicle(nbt, vehicle_uuid);
+        }
+        self.statistics.write_nbt(nbt);
+    }
+}
+
+impl Player {
+    async fn capture_player_save_snapshot(&self) -> PlayerSaveSnapshot {
+        let owned = capture_player_owned_save_snapshot(
+            PlayerOwnedSaveSnapshotSources {
+                inventory: &self.inventory,
+                ender_chest_inventory: &self.ender_chest_inventory,
+                abilities: &self.abilities,
+                respawn_point: &self.respawn_point,
+                vehicle: &self.living_entity.entity.vehicle,
+                statistics: &self.stats,
+            },
+            |vehicle| {
+                vehicle
+                    .as_ref()
+                    .map(|vehicle| vehicle.get_entity().entity_uuid)
+            },
+            || self.root_vehicle_uuid.load(),
+        )
+        .await;
+
+        let experience_level = self.experience_level.load(Ordering::Relaxed);
+        let air_supply = self
+            .breath_manager
+            .air_supply
+            .load(Ordering::Relaxed)
+            .clamp(0, super::breath::MAX_AIR);
+        PlayerSaveSnapshot {
+            inventory: owned.inventory,
+            ender_chest: owned.ender_chest,
+            abilities: owned.abilities,
+            experience_progress: self.experience_progress.load(),
+            experience_level,
+            experience_total: experience::points_to_level(experience_level)
+                + self.experience_points.load(Ordering::Relaxed),
+            enchantment_seed: self.enchantment_seed.load(Ordering::Relaxed),
+            score: self.score.load(Ordering::Relaxed),
+            sleeping_since: self.sleeping_since.load().unwrap_or(0) as i16,
+            gamemode: self.gamemode.load(),
+            previous_gamemode: self.previous_gamemode.load(),
+            seen_credits: self.seen_credits.load(Ordering::Relaxed),
+            spawn_extra_particles_on_fall: self
+                .spawn_extra_particles_on_fall
+                .load(Ordering::Relaxed),
+            has_played_before: self.has_played_before.load(Ordering::Relaxed),
+            hunger: HungerSaveSnapshot {
+                level: self.hunger_manager.level.load(),
+                saturation: self.hunger_manager.saturation.load(),
+                exhaustion: self.hunger_manager.exhaustion.load(),
+                tick_timer: self.hunger_manager.tick_timer.load(),
+            },
+            air_supply,
+            drowning_tick: self
+                .breath_manager
+                .drowning_tick
+                .load(Ordering::Relaxed)
+                .clamp(0, super::breath::DROWNING_INTERVAL - 1),
+            dimension: Arc::from(self.world().dimension.minecraft_name),
+            respawn_point: owned.respawn_point,
+            vehicle_uuid: owned.vehicle_uuid,
+            statistics: owned.statistics,
+        }
+    }
+}
+
 impl EntityBase for Player {
     fn damage_with_context<'a>(
         &'a self,
-        caller: &'a dyn EntityBase,
-        amount: f32,
-        damage_type: DamageType,
-        position: Option<Vector3<f64>>,
-        source: Option<&'a dyn EntityBase>,
-        cause: Option<&'a dyn EntityBase>,
+        target: &'a dyn EntityBase,
+        context: DamageContext<'a>,
     ) -> EntityBaseFuture<'a, bool> {
         Box::pin(async move {
+            let damage_type = context.damage_type();
             if self.abilities.lock().await.invulnerable
                 && damage_type != DamageType::GENERIC_KILL
                 && damage_type != DamageType::OUT_OF_WORLD
@@ -5849,13 +6110,18 @@ impl EntityBase for Player {
             // TODO: Implement shield blocking durability.
             let result = self
                 .living_entity
-                .damage_with_context(caller, amount, damage_type, position, source, cause)
+                .damage_with_context(target, context)
                 .await;
             if result {
                 let health = self.living_entity.health.load();
                 if health <= 0.0 {
-                    let death_message =
-                        LivingEntity::get_death_message(caller, damage_type, source, cause).await;
+                    let death_message = LivingEntity::get_death_message(
+                        target,
+                        damage_type,
+                        context.direct_entity(),
+                        context.causing_entity(),
+                    )
+                    .await;
                     self.handle_killed(death_message).await;
                 }
             }
@@ -5975,101 +6241,9 @@ impl EntityBase for Player {
         self
     }
 
-    fn write_custom_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
+    fn write_custom_nbt_async<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
-            nbt.put_int("DataVersion", DATA_VERSION);
-            self.inventory.write_nbt(nbt).await;
-            self.ender_chest_inventory.write_nbt(nbt).await;
-
-            self.abilities.lock().await.write_nbt(nbt).await;
-
-            let total_exp =
-                experience::points_to_level(self.experience_level.load(Ordering::Relaxed))
-                    + self.experience_points.load(Ordering::Relaxed);
-            nbt.put_float("XpP", self.experience_progress.load());
-            nbt.put_int("XpLevel", self.experience_level.load(Ordering::Relaxed));
-            nbt.put_int("XpTotal", total_exp);
-            nbt.put_int("XpSeed", self.enchantment_seed.load(Ordering::Relaxed));
-            nbt.put_int("Score", self.score.load(Ordering::Relaxed));
-            nbt.put_short("SleepTimer", self.sleeping_since.load().unwrap_or(0) as i16);
-
-            nbt.put_int("playerGameType", self.gamemode.load() as i32);
-            if let Some(previous_gamemode) = self.previous_gamemode.load() {
-                nbt.put_int("previousPlayerGameType", previous_gamemode as i32);
-            }
-
-            nbt.put_bool("seenCredits", self.seen_credits.load(Ordering::Relaxed));
-            nbt.put_bool(
-                "spawn_extra_particles_on_fall",
-                self.spawn_extra_particles_on_fall.load(Ordering::Relaxed),
-            );
-            nbt.put_bool(
-                "HasPlayedBefore",
-                self.has_played_before.load(Ordering::Relaxed),
-            );
-
-            // Store food level, saturation, exhaustion, and tick timer
-            self.hunger_manager.write_nbt(nbt).await;
-
-            let air_supply = self
-                .breath_manager
-                .air_supply
-                .load(Ordering::Relaxed)
-                .clamp(0, super::breath::MAX_AIR);
-            nbt.put_short("Air", air_supply as i16);
-            nbt.put_int("AirSupply", air_supply);
-            nbt.put_int(
-                "DrowningTick",
-                self.breath_manager
-                    .drowning_tick
-                    .load(Ordering::Relaxed)
-                    .clamp(0, super::breath::DROWNING_INTERVAL - 1),
-            );
-
-            nbt.put_string(
-                "Dimension",
-                self.world().dimension.minecraft_name.to_string(),
-            );
-
-            if let Some(respawn) = self.respawn_point.lock().await.as_ref() {
-                nbt.put_int("SpawnX", respawn.position.0.x);
-                nbt.put_int("SpawnY", respawn.position.0.y);
-                nbt.put_int("SpawnZ", respawn.position.0.z);
-                nbt.put_string(
-                    "SpawnDimension",
-                    respawn.dimension.minecraft_name.to_owned(),
-                );
-                nbt.put_bool("SpawnForced", respawn.force);
-
-                let mut respawn_compound = NbtCompound::new();
-                respawn_compound
-                    .put_string("dimension", respawn.dimension.minecraft_name.to_string());
-                respawn_compound.put(
-                    "pos",
-                    NbtTag::IntArray(vec![
-                        respawn.position.0.x,
-                        respawn.position.0.y,
-                        respawn.position.0.z,
-                    ]),
-                );
-                respawn_compound.put_float("angle", respawn.yaw);
-                respawn_compound.put_bool("forced", respawn.force);
-                nbt.put_compound("respawn", respawn_compound);
-            }
-
-            let vehicle_uuid = self
-                .living_entity
-                .entity
-                .vehicle
-                .lock()
-                .await
-                .as_ref()
-                .map(|vehicle| vehicle.get_entity().entity_uuid)
-                .or_else(|| self.root_vehicle_uuid.load());
-            if let Some(vehicle_uuid) = vehicle_uuid {
-                write_root_vehicle(nbt, vehicle_uuid);
-            }
-            self.stats.lock().await.write_nbt(nbt);
+            self.capture_player_save_snapshot().await.write_nbt(nbt);
         })
     }
 
@@ -6242,6 +6416,7 @@ pub enum TitleMode {
 /// Represents a player's abilities and special powers.
 ///
 /// This struct contains information about the player's current abilities, such as flight, invulnerability, and creative mode.
+#[derive(Clone)]
 pub struct Abilities {
     /// Indicates whether the player is invulnerable to damage.
     pub invulnerable: bool,
@@ -6278,6 +6453,20 @@ impl NBTStorage for Abilities {
         Box::pin(async move {
             self.read_nbt(nbt);
         })
+    }
+}
+
+impl Abilities {
+    fn write_snapshot_nbt(&self, nbt: &mut NbtCompound) {
+        let mut component = NbtCompound::new();
+        component.put_bool("invulnerable", self.invulnerable);
+        component.put_bool("flying", self.flying);
+        component.put_bool("mayfly", self.allow_flying);
+        component.put_bool("instabuild", self.creative);
+        component.put_bool("mayBuild", self.allow_modify_world);
+        component.put_float("flySpeed", self.fly_speed);
+        component.put_float("walkSpeed", self.walk_speed);
+        nbt.put_compound("abilities", component);
     }
 }
 
@@ -7064,8 +7253,22 @@ impl InventoryPlayer for Player {
 
 #[cfg(test)]
 mod tests {
-    use super::{bedrock_inventory_slot, read_root_vehicle, write_root_vehicle};
+    use super::{
+        Abilities, EnderChestSaveSnapshot, HungerSaveSnapshot, PlayerInventorySaveSnapshot,
+        PlayerOwnedSaveSnapshotSources, PlayerSaveSnapshot, bedrock_inventory_slot,
+        capture_player_owned_save_snapshot, read_root_vehicle,
+        statistics::{StatisticCategory, Statistics},
+        write_root_vehicle,
+    };
+    use pumpkin_data::{item::Item, item_stack::ItemStack};
+    use pumpkin_inventory::{
+        entity_equipment::EntityEquipment,
+        player::{ender_chest_inventory::EnderChestInventory, player_inventory::PlayerInventory},
+    };
     use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
+    use pumpkin_util::GameMode;
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use tokio::sync::Mutex;
     use uuid::Uuid;
 
     #[test]
@@ -7111,6 +7314,143 @@ mod tests {
         nbt.put("RootVehicle", NbtTag::Compound(root_vehicle));
 
         assert_eq!(read_root_vehicle(&nbt), Some(expected));
+    }
+
+    #[test]
+    fn player_snapshot_writes_all_owned_sections_without_live_guards() {
+        let vehicle_uuid = Uuid::from_u128(0x1234);
+        let snapshot = PlayerSaveSnapshot {
+            inventory: PlayerInventorySaveSnapshot {
+                selected_slot: 2,
+                main_inventory: std::array::from_fn(|_| ItemStack::EMPTY.clone()),
+                equipment: EntityEquipment::default(),
+            },
+            ender_chest: EnderChestSaveSnapshot {
+                items: std::array::from_fn(|_| ItemStack::EMPTY.clone()),
+            },
+            abilities: Abilities::default(),
+            experience_progress: 0.5,
+            experience_level: 3,
+            experience_total: 17,
+            enchantment_seed: 11,
+            score: 9,
+            sleeping_since: 4,
+            gamemode: GameMode::Survival,
+            previous_gamemode: None,
+            seen_credits: true,
+            spawn_extra_particles_on_fall: false,
+            has_played_before: true,
+            hunger: HungerSaveSnapshot {
+                level: 18,
+                saturation: 3.0,
+                exhaustion: 1.5,
+                tick_timer: 7,
+            },
+            air_supply: 250,
+            drowning_tick: 5,
+            dimension: Arc::from("minecraft:overworld"),
+            respawn_point: None,
+            vehicle_uuid: Some(vehicle_uuid),
+            statistics: Statistics::default(),
+        };
+
+        let mut nbt = NbtCompound::new();
+        snapshot.write_nbt(&mut nbt);
+
+        assert_eq!(nbt.get_int("SelectedItemSlot"), Some(2));
+        assert_eq!(nbt.get_int("XpTotal"), Some(17));
+        assert_eq!(nbt.get_int("foodLevel"), Some(18));
+        assert_eq!(nbt.get_string("Dimension"), Some("minecraft:overworld"));
+        assert!(nbt.get_compound("abilities").is_some());
+        assert!(nbt.get_list("Inventory").is_some_and(<[NbtTag]>::is_empty));
+        assert!(nbt.get_list("EnderItems").is_some_and(<[NbtTag]>::is_empty));
+        assert_eq!(read_root_vehicle(&nbt), Some(vehicle_uuid));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_player_owner_mutation_keeps_snapshot_generation_consistent() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let equipment = Arc::new(Mutex::new(EntityEquipment::default()));
+            let inventory = Arc::new(PlayerInventory::new(
+                Arc::clone(&equipment),
+                Arc::new(HashMap::new()),
+            ));
+            let ender_chest = Arc::new(EnderChestInventory::new());
+            let abilities = Arc::new(Mutex::new(Abilities::default()));
+            let respawn_point = Arc::new(Mutex::new(None));
+            let vehicle = Arc::new(Mutex::new(Some(Uuid::from_u128(1))));
+            let statistics = Arc::new(Mutex::new(Statistics::default()));
+
+            {
+                inventory.main_inventory.write().await[0] = ItemStack::new(1, &Item::STONE);
+                statistics.lock().await.set(StatisticCategory::Custom, 0, 1);
+            };
+
+            let writer = {
+                let inventory = Arc::clone(&inventory);
+                let ender_chest = Arc::clone(&ender_chest);
+                let abilities = Arc::clone(&abilities);
+                let respawn_point = Arc::clone(&respawn_point);
+                let vehicle = Arc::clone(&vehicle);
+                let statistics = Arc::clone(&statistics);
+                tokio::spawn(async move {
+                    for index in 0..1_000 {
+                        let generation = if index & 1 == 0 { 1 } else { 2 };
+                        let mut main_inventory = inventory.main_inventory.write().await;
+                        let equipment = inventory.entity_equipment.lock().await;
+                        let ender_chest = ender_chest.items.write().await;
+                        let abilities = abilities.lock().await;
+                        let respawn_point = respawn_point.lock().await;
+                        let mut vehicle = vehicle.lock().await;
+                        let mut statistics = statistics.lock().await;
+
+                        main_inventory[0] = ItemStack::new(generation, &Item::STONE);
+                        *vehicle = Some(Uuid::from_u128(u128::from(generation)));
+                        statistics.set(StatisticCategory::Custom, 0, i32::from(generation));
+
+                        drop(statistics);
+                        drop(vehicle);
+                        drop(respawn_point);
+                        drop(abilities);
+                        drop(ender_chest);
+                        drop(equipment);
+                        drop(main_inventory);
+                        tokio::task::yield_now().await;
+                    }
+                })
+            };
+
+            for _ in 0..1_000 {
+                let snapshot = capture_player_owned_save_snapshot(
+                    PlayerOwnedSaveSnapshotSources {
+                        inventory: &inventory,
+                        ender_chest_inventory: &ender_chest,
+                        abilities: &abilities,
+                        respawn_point: &respawn_point,
+                        vehicle: &vehicle,
+                        statistics: &statistics,
+                    },
+                    |vehicle| *vehicle,
+                    || None,
+                )
+                .await;
+                let generation = snapshot.inventory.main_inventory[0].item_count;
+                assert!(matches!(generation, 1 | 2));
+                assert_eq!(
+                    snapshot.vehicle_uuid,
+                    Some(Uuid::from_u128(u128::from(generation)))
+                );
+                assert_eq!(
+                    snapshot.statistics.get(StatisticCategory::Custom, 0),
+                    i32::from(generation)
+                );
+                tokio::task::yield_now().await;
+            }
+
+            writer.await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

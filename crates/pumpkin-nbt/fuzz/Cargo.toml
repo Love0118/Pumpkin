@@ -39,3 +39,17 @@ path = "fuzz_targets/decompress_gzip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "roundtrip_java"
+path = "fuzz_targets/roundtrip_java.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "serialize_failure"
+path = "fuzz_targets/serialize_failure.rs"
+test = false
+doc = false
+bench = false

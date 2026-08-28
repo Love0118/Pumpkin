@@ -6,8 +6,8 @@ use crate::entity::{
     Entity,
     ai::goal::{
         active_target::ActiveTargetGoal, look_around::RandomLookAroundGoal,
-        look_at_entity::LookAtEntityGoal, melee_attack::MeleeAttackGoal, swim::SwimGoal,
-        wander_around::WanderAroundGoal,
+        look_at_entity::LookAtEntityGoal, melee_attack::MeleeAttackGoal, revenge::RevengeGoal,
+        swim::SwimGoal, wander_around::WanderAroundGoal,
     },
     mob::{Mob, MobEntity},
 };
@@ -47,6 +47,7 @@ impl SilverfishEntity {
             );
             goal_selector.add_goal(8, Box::new(RandomLookAroundGoal::default()));
 
+            target_selector.add_goal(1, Box::new(RevengeGoal::new(true).set_alert_others()));
             target_selector.add_goal(
                 2,
                 ActiveTargetGoal::with_default(&mob_arc.entity, &EntityType::PLAYER, true),

@@ -1,16 +1,14 @@
 use pumpkin_util::Difficulty;
 
+use crate::entity::ai::sensing::Sensing;
 use crate::entity::living::LivingEntity;
+use crate::entity::mob::Mob;
 use crate::world::World;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 const MIN_DISTANCE: f64 = 2.0;
 
-pub type PredicateFn = dyn Fn(Arc<LivingEntity>, Arc<World>) -> Pin<Box<dyn Future<Output = bool> + Send>>
-    + Send
-    + Sync;
+pub type PredicateFn = dyn Fn(&LivingEntity, &World) -> bool + Send + Sync;
 
 pub struct TargetPredicate {
     pub attackable: bool,
@@ -79,25 +77,22 @@ impl TargetPredicate {
         self
     }
 
-    pub fn set_predicate<F, Fut>(&mut self, predicate: F)
+    pub fn set_predicate<F>(&mut self, predicate: F)
     where
-        F: Fn(Arc<LivingEntity>, Arc<World>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = bool> + Send + 'static,
+        F: Fn(&LivingEntity, &World) -> bool + Send + Sync + 'static,
     {
-        self.predicate = Some(Arc::new(
-            move |living_entity: Arc<LivingEntity>, world: Arc<World>| {
-                Box::pin(predicate(living_entity, world))
-            },
-        ));
+        self.predicate = Some(Arc::new(predicate));
     }
 
     pub async fn test(
         &self,
         world: &World,
-        tester: Option<&LivingEntity>,
+        tester: Option<&dyn Mob>,
         target: &LivingEntity,
+        sensing: &Sensing,
     ) -> bool {
-        if tester.is_some_and(|t| std::ptr::eq(t, target)) {
+        let tester_living = tester.map(|mob| &mob.get_mob_entity().living_entity);
+        if tester_living.is_some_and(|tester| tester.entity.entity_id == target.entity.entity_id) {
             return false;
         }
 
@@ -112,7 +107,7 @@ impl TargetPredicate {
             return false;
         }
 
-        if let Some(tester_ent) = tester
+        if let Some(tester_ent) = tester_living
             && self.base_max_distance > 0.0
         {
             // TODO: use distance_scaling_factor from target
@@ -128,19 +123,49 @@ impl TargetPredicate {
             }
         }
 
-        if self.respects_visibility
-            && let Some(tester_ent) = tester
-            && tester_ent
-                .entity
-                .world
-                .load_full()
-                .raycast(
-                    tester_ent.entity.get_eye_pos(),
-                    target.entity.get_eye_pos(),
-                    async |block_pos, world| world.get_block_state(block_pos).is_solid(),
-                )
+        if let Some(tester) = tester {
+            let tester_entity = tester.get_entity();
+            if world
+                .entities_are_allied(tester_entity, &target.entity)
                 .await
-                .is_some()
+            {
+                return false;
+            }
+            if let Some(owner_uuid) = tester
+                .as_tamable()
+                .and_then(super::super::passive::tamable::TamableAnimal::get_owner)
+            {
+                if target.entity.entity_uuid == owner_uuid {
+                    return false;
+                }
+                if world
+                    .get_entity_by_uuid(target.entity.entity_uuid)
+                    .is_some_and(|target_entity| {
+                        target_entity
+                            .get_mob()
+                            .and_then(|mob| mob.as_tamable())
+                            .and_then(super::super::passive::tamable::TamableAnimal::get_owner)
+                            == Some(owner_uuid)
+                    })
+                {
+                    return false;
+                }
+            }
+        }
+
+        if self.respects_visibility
+            && let Some(tester_ent) = tester_living
+            && !sensing
+                .has_line_of_sight(&tester_ent.entity, &target.entity)
+                .await
+        {
+            return false;
+        }
+
+        if self
+            .predicate
+            .as_ref()
+            .is_some_and(|predicate| !predicate(target, world))
         {
             return false;
         }

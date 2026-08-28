@@ -3033,7 +3033,8 @@ impl pumpkin::plugin::player::HostJavaPlayer for PluginHostState {
 
         let protocol_dialog = super::events::dialog::protocol_dialog_from_wasm(self, &dialog);
 
-        if let Some(server) = player.world().server.upgrade() {
+        let server = player.world().server.upgrade();
+        if let Some(server) = server {
             let mut event = crate::plugin::api::events::dialog::dialog_show::DialogShowEvent::new(
                 player.clone(),
                 protocol_dialog.clone(),
@@ -3084,7 +3085,8 @@ impl pumpkin::plugin::player::HostJavaPlayer for PluginHostState {
             .provider
             .clone();
 
-        if let Some(server) = player.world().server.upgrade() {
+        let server = player.world().server.upgrade();
+        if let Some(server) = server {
             let mut event = crate::plugin::api::events::dialog::dialog_clear::DialogClearEvent::new(
                 player.clone(),
             );

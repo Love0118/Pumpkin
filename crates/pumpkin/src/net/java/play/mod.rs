@@ -5,7 +5,7 @@ use rsa::signature::Verifier;
 use sha1::Sha1;
 use std::num::NonZero;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::{Level, debug, error, info, trace, warn};
@@ -80,7 +80,6 @@ use pumpkin_util::math::{polynomial_rolling_hash, position::BlockPos, wrap_degre
 use pumpkin_util::{GameMode, text::TextComponent};
 use pumpkin_world::generation::structure::structures::jigsaw::JigsawJointType;
 use pumpkin_world::world::BlockFlags;
-use tokio::sync::Mutex;
 
 /// In secure chat mode, Player will be kicked if they send a chat message with a timestamp that is older than this (in ms)
 /// Vanilla: 2 minutes

@@ -23,7 +23,7 @@ impl BlockEntity for CrafterBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let items = self.items.read().await;
+            let items = self.items.read().await.clone();
             sync_write_items_to_nbt(items.as_slice(), nbt);
             nbt.put_int(
                 "crafting_ticks_remaining",
@@ -121,6 +121,10 @@ impl Inventory for CrafterBlockEntity {
             let items = self.items.read().await;
             items[slot].clone()
         })
+    }
+
+    fn snapshot_stacks(&self) -> InventoryFuture<'_, Vec<ItemStack>> {
+        Box::pin(async move { self.items.read().await.to_vec() })
     }
 
     fn remove_stack(&self, slot: usize) -> InventoryFuture<'_, ItemStack> {

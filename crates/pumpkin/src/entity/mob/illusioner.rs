@@ -1,14 +1,18 @@
 use std::sync::{Arc, Weak};
 
-use pumpkin_data::entity::EntityType;
 use pumpkin_data::sound::Sound;
+use pumpkin_data::{entity::EntityType, tag};
 use pumpkin_nbt::compound::NbtCompound;
 
 use crate::entity::{
     Entity, NbtFuture,
     ai::goal::{
-        active_target::ActiveTargetGoal, look_around::RandomLookAroundGoal,
-        look_at_entity::LookAtEntityGoal, swim::SwimGoal, wander_around::WanderAroundGoal,
+        active_target::ActiveTargetGoal,
+        look_around::RandomLookAroundGoal,
+        look_at_entity::LookAtEntityGoal,
+        revenge::{EntityTypeFilter, RevengeGoal},
+        swim::SwimGoal,
+        wander_around::WanderAroundGoal,
     },
     mob::{
         Mob, MobEntity,
@@ -65,6 +69,16 @@ impl IllusionerEntity {
                 .target_selector
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            target_selector.add_goal(
+                1,
+                Box::new(
+                    RevengeGoal::new(true)
+                        .ignore_damage_from(&[EntityTypeFilter::Tag(
+                            &tag::EntityType::MINECRAFT_RAIDERS,
+                        )])
+                        .set_alert_others(),
+                ),
+            );
             target_selector.add_goal(
                 1,
                 ActiveTargetGoal::with_default(&mob_arc.mob_entity, &EntityType::PLAYER, true),

@@ -434,7 +434,7 @@ impl HostCommandBlockEntity for PluginHostState {
     async fn last_output(&mut self, res: Resource<CommandBlockEntity>) -> wasmtime::Result<String> {
         let entity = block_entity_from_resource(self, &Resource::new_own(res.rep()))?;
         if let Some(cmd) = entity.as_any().downcast_ref::<InternalCommandBlockEntity>() {
-            Ok(cmd.last_output.lock().await.clone())
+            Ok(cmd.last_output().await)
         } else {
             Err(wasmtime::Error::msg("Not a command block entity"))
         }
@@ -465,7 +465,7 @@ impl HostCommandBlockEntity for PluginHostState {
     async fn command(&mut self, res: Resource<CommandBlockEntity>) -> wasmtime::Result<String> {
         let entity = block_entity_from_resource(self, &Resource::new_own(res.rep()))?;
         if let Some(cmd) = entity.as_any().downcast_ref::<InternalCommandBlockEntity>() {
-            Ok(cmd.command.lock().await.clone())
+            Ok(cmd.command().await)
         } else {
             Err(wasmtime::Error::msg("Not a command block entity"))
         }
@@ -1350,7 +1350,7 @@ impl HostBannerBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalBannerBlockEntity>()
-            .and_then(|b| b.custom_name.try_lock().ok().and_then(|g| g.clone())))
+            .and_then(InternalBannerBlockEntity::try_custom_name))
     }
 
     async fn drop(&mut self, rep: Resource<BannerBlockEntity>) -> wasmtime::Result<()> {
@@ -1474,13 +1474,8 @@ impl HostBeehiveBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalBeehiveBlockEntity>()
-            .map_or(0, |b| {
-                b.bees
-                    .try_lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().map(|v| v.len() as u32))
-                    .unwrap_or(0)
-            }))
+            .and_then(InternalBeehiveBlockEntity::try_bee_count)
+            .map_or(0, |count| count as u32))
     }
 
     async fn drop(&mut self, rep: Resource<BeehiveBlockEntity>) -> wasmtime::Result<()> {
@@ -1761,7 +1756,8 @@ impl HostEndGatewayBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalEndGatewayBlockEntity>()
-            .map_or(0, |b| b.age.try_lock().ok().map_or(0, |g| *g)))
+            .and_then(InternalEndGatewayBlockEntity::try_age)
+            .unwrap_or(0))
     }
 
     async fn is_exact_teleport(
@@ -1772,7 +1768,8 @@ impl HostEndGatewayBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalEndGatewayBlockEntity>()
-            .is_some_and(|b| b.exact_teleport.try_lock().is_ok_and(|g| *g)))
+            .and_then(InternalEndGatewayBlockEntity::try_exact_teleport)
+            .unwrap_or(false))
     }
 
     async fn drop(&mut self, rep: Resource<EndGatewayBlockEntity>) -> wasmtime::Result<()> {
@@ -1906,12 +1903,8 @@ impl HostJigsawBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalJigsawBlockEntity>()
-            .map_or_else(String::new, |b| {
-                b.name
-                    .try_lock()
-                    .ok()
-                    .map_or_else(String::new, |g| g.clone())
-            }))
+            .and_then(InternalJigsawBlockEntity::try_name)
+            .unwrap_or_default())
     }
 
     async fn get_target(&mut self, res: Resource<JigsawBlockEntity>) -> wasmtime::Result<String> {
@@ -1919,12 +1912,8 @@ impl HostJigsawBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalJigsawBlockEntity>()
-            .map_or_else(String::new, |b| {
-                b.target
-                    .try_lock()
-                    .ok()
-                    .map_or_else(String::new, |g| g.clone())
-            }))
+            .and_then(InternalJigsawBlockEntity::try_target)
+            .unwrap_or_default())
     }
 
     async fn get_pool(&mut self, res: Resource<JigsawBlockEntity>) -> wasmtime::Result<String> {
@@ -1932,12 +1921,8 @@ impl HostJigsawBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalJigsawBlockEntity>()
-            .map_or_else(String::new, |b| {
-                b.pool
-                    .try_lock()
-                    .ok()
-                    .map_or_else(String::new, |g| g.clone())
-            }))
+            .and_then(InternalJigsawBlockEntity::try_pool)
+            .unwrap_or_default())
     }
 
     async fn get_final_state(
@@ -1948,12 +1933,8 @@ impl HostJigsawBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalJigsawBlockEntity>()
-            .map_or_else(String::new, |b| {
-                b.final_state
-                    .try_lock()
-                    .ok()
-                    .map_or_else(String::new, |g| g.clone())
-            }))
+            .and_then(InternalJigsawBlockEntity::try_final_state)
+            .unwrap_or_default())
     }
 
     async fn get_selection_priority(
@@ -1964,10 +1945,8 @@ impl HostJigsawBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalJigsawBlockEntity>()
-            .map_or(0, |b| {
-                b.selection_priority
-                    .load(std::sync::atomic::Ordering::Relaxed)
-            }))
+            .and_then(InternalJigsawBlockEntity::try_selection_priority)
+            .unwrap_or(0))
     }
 
     async fn get_placement_priority(
@@ -1978,10 +1957,8 @@ impl HostJigsawBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalJigsawBlockEntity>()
-            .map_or(0, |b| {
-                b.placement_priority
-                    .load(std::sync::atomic::Ordering::Relaxed)
-            }))
+            .and_then(InternalJigsawBlockEntity::try_placement_priority)
+            .unwrap_or(0))
     }
 
     async fn drop(&mut self, rep: Resource<JigsawBlockEntity>) -> wasmtime::Result<()> {
@@ -2130,7 +2107,7 @@ impl HostSkullBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalSkullBlockEntity>()
-            .and_then(|b| b.note_block_sound.try_lock().ok().and_then(|g| g.clone())))
+            .and_then(InternalSkullBlockEntity::try_note_block_sound))
     }
 
     async fn drop(&mut self, rep: Resource<SkullBlockEntity>) -> wasmtime::Result<()> {
@@ -2164,11 +2141,8 @@ impl HostStructureBlockBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalStructureBlockBlockEntity>()
-            .map_or_else(String::new, |b| {
-                b.name
-                    .try_lock()
-                    .ok()
-                    .map_or_else(String::new, |g| g.clone())
+            .map_or_else(String::new, |block_entity| {
+                block_entity.try_name().unwrap_or_default()
             }))
     }
 
@@ -2180,11 +2154,8 @@ impl HostStructureBlockBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalStructureBlockBlockEntity>()
-            .map_or_else(String::new, |b| {
-                b.author
-                    .try_lock()
-                    .ok()
-                    .map_or_else(String::new, |g| g.clone())
+            .map_or_else(String::new, |block_entity| {
+                block_entity.try_author().unwrap_or_default()
             }))
     }
 
@@ -2196,11 +2167,8 @@ impl HostStructureBlockBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalStructureBlockBlockEntity>()
-            .map_or_else(String::new, |b| {
-                b.mode
-                    .try_lock()
-                    .ok()
-                    .map_or_else(String::new, |g| g.clone())
+            .map_or_else(String::new, |block_entity| {
+                block_entity.try_mode().unwrap_or_default()
             }))
     }
 
@@ -2212,7 +2180,9 @@ impl HostStructureBlockBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalStructureBlockBlockEntity>()
-            .map_or(1.0, |b| b.integrity.try_lock().ok().map_or(1.0, |g| *g)))
+            .map_or(1.0, |block_entity| {
+                block_entity.try_integrity().unwrap_or(1.0)
+            }))
     }
 
     async fn get_seed(
@@ -2223,7 +2193,7 @@ impl HostStructureBlockBlockEntity for PluginHostState {
         Ok(entity
             .as_any()
             .downcast_ref::<InternalStructureBlockBlockEntity>()
-            .map_or(0, |b| b.seed.try_lock().ok().map_or(0, |g| *g)))
+            .map_or(0, |block_entity| block_entity.try_seed().unwrap_or(0)))
     }
 
     async fn drop(&mut self, rep: Resource<StructureBlockBlockEntity>) -> wasmtime::Result<()> {

@@ -64,7 +64,7 @@ impl BlockEntity for JukeboxBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let record = self.record_stack.lock().await;
+            let record = self.record_stack.lock().await.clone();
             if !record.is_empty() {
                 let mut record_nbt = NbtCompound::new();
                 record.write_item_stack(&mut record_nbt);
@@ -203,6 +203,10 @@ impl Inventory for JukeboxBlockEntity {
 
     fn get_stack(&self, _slot: usize) -> InventoryFuture<'_, ItemStack> {
         Box::pin(async move { self.record_stack.lock().await.clone() })
+    }
+
+    fn snapshot_stacks(&self) -> InventoryFuture<'_, Vec<ItemStack>> {
+        Box::pin(async move { vec![self.record_stack.lock().await.clone()] })
     }
 
     fn remove_stack(&self, _slot: usize) -> InventoryFuture<'_, ItemStack> {

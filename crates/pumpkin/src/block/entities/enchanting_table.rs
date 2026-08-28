@@ -34,8 +34,9 @@ impl BlockEntity for EnchantingTableBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(name) = self.custom_name.lock().await.as_ref() {
-                nbt.put_string("CustomName", name.clone());
+            let custom_name = self.custom_name.lock().await.clone();
+            if let Some(name) = custom_name {
+                nbt.put_string("CustomName", name);
             }
         })
     }

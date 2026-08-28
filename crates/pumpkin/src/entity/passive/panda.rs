@@ -5,8 +5,8 @@ use pumpkin_data::entity::EntityType;
 use crate::entity::{
     Entity,
     ai::goal::{
-        look_around::RandomLookAroundGoal, look_at_entity::LookAtEntityGoal, swim::SwimGoal,
-        wander_around::WanderAroundGoal,
+        look_around::RandomLookAroundGoal, look_at_entity::LookAtEntityGoal, revenge::RevengeGoal,
+        swim::SwimGoal, wander_around::WanderAroundGoal,
     },
     mob::{Mob, MobEntity},
 };
@@ -42,6 +42,15 @@ impl PandaEntity {
                 LookAtEntityGoal::with_default(mob_weak, &EntityType::PLAYER, 6.0),
             );
             goal_selector.add_goal(3, Box::new(RandomLookAroundGoal::default()));
+        };
+
+        {
+            let mut target_selector = mob_arc
+                .mob_entity
+                .target_selector
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            target_selector.add_goal(1, Box::new(RevengeGoal::new(true)));
         };
 
         mob_arc

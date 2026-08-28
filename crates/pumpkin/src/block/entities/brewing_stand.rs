@@ -18,7 +18,9 @@ use pumpkin_data::tag::{self, Taggable};
 use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
-use pumpkin_world::inventory::{Inventory, sync_read_items_from_nbt, sync_write_items_to_nbt};
+use pumpkin_world::inventory::{
+    Inventory, InventoryFuture, sync_read_items_from_nbt, sync_write_items_to_nbt,
+};
 use tokio::sync::RwLock;
 
 pub struct BrewingStandBlockEntity {
@@ -215,6 +217,10 @@ impl pumpkin_world::inventory::Inventory for BrewingStandBlockEntity {
         Self::INVENTORY_SIZE
     }
 
+    fn snapshot_stacks(&self) -> InventoryFuture<'_, Vec<ItemStack>> {
+        Box::pin(async move { self.items.read().await.to_vec() })
+    }
+
     fn is_empty(&self) -> pumpkin_world::inventory::InventoryFuture<'_, bool> {
         Box::pin(async move {
             let items = self.items.read().await;
@@ -390,12 +396,13 @@ impl crate::block::entities::BlockEntity for BrewingStandBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            let items = self.items.read().await.clone();
             // Persist brew state
             nbt.put_int("BrewTime", self.brew_time.load(Ordering::Relaxed));
             nbt.put_int("Fuel", self.fuel.load(Ordering::Relaxed));
 
             // Save inventory contents to NBT
-            self.write_inventory_nbt(nbt, true).await;
+            sync_write_items_to_nbt(&items, nbt);
         })
     }
 
@@ -404,10 +411,11 @@ impl crate::block::entities::BlockEntity for BrewingStandBlockEntity {
     }
 
     fn chunk_data_nbt(&self) -> Option<NbtCompound> {
+        let items = self.items.try_read().ok()?.clone();
         let mut nbt = NbtCompound::new();
         nbt.put_int("BrewTime", self.brew_time.load(Ordering::Relaxed));
         nbt.put_int("Fuel", self.fuel.load(Ordering::Relaxed));
-        sync_write_items_to_nbt(&*futures::executor::block_on(self.items.read()), &mut nbt);
+        sync_write_items_to_nbt(&items, &mut nbt);
         Some(nbt)
     }
 

@@ -16,8 +16,10 @@ use crate::entity::{
     ai::goal::{
         active_target::ActiveTargetGoal, look_around::RandomLookAroundGoal,
         look_at_entity::LookAtEntityGoal, melee_attack::MeleeAttackGoal,
-        offer_flower::OfferFlowerGoal, revenge::RevengeGoal, wander_around::WanderAroundGoal,
+        offer_flower::OfferFlowerGoal, persistent_anger_target::PersistentAngerTargetGoal,
+        revenge::RevengeGoal, wander_around::WanderAroundGoal,
     },
+    ai::neutral::{NeutralMob, PersistentAngerState},
     mob::{Mob, MobEntity},
     player::Player,
 };
@@ -30,6 +32,8 @@ pub struct IronGolemEntity {
     pub player_created: AtomicBool,
     pub attack_animation_tick: AtomicI32,
     pub offer_flower_tick: AtomicI32,
+    pub persistent_anger: PersistentAngerState,
+    last_observed_attack_target: AtomicI32,
 }
 
 impl IronGolemEntity {
@@ -40,6 +44,8 @@ impl IronGolemEntity {
             player_created: AtomicBool::new(false),
             attack_animation_tick: AtomicI32::new(0),
             offer_flower_tick: AtomicI32::new(0),
+            persistent_anger: PersistentAngerState::default(),
+            last_observed_attack_target: AtomicI32::new(0),
         };
         let mob_arc = Arc::new(iron_golem);
         let mob_weak: Weak<dyn Mob> = {
@@ -69,10 +75,7 @@ impl IronGolemEntity {
             goal_selector.add_goal(8, Box::new(RandomLookAroundGoal::default()));
 
             target_selector.add_goal(1, Box::new(RevengeGoal::new(true)));
-            target_selector.add_goal(
-                2,
-                ActiveTargetGoal::with_default(&mob_arc.mob_entity, &EntityType::PLAYER, false),
-            );
+            target_selector.add_goal(2, PersistentAngerTargetGoal::new());
             target_selector.add_goal(
                 3,
                 ActiveTargetGoal::with_default(&mob_arc.mob_entity, &EntityType::ZOMBIE, true),
@@ -116,15 +119,48 @@ impl IronGolemEntity {
     pub fn get_offer_flower_tick(&self) -> i32 {
         self.offer_flower_tick.load(Ordering::Relaxed)
     }
+
+    #[must_use]
+    pub fn get_attack_animation_tick(&self) -> i32 {
+        self.attack_animation_tick.load(Ordering::Relaxed)
+    }
+
+    fn observe_attack_event(&self) {
+        let living = &self.mob_entity.living_entity;
+        let attacking_id = living.last_attacking_id.load(Ordering::Relaxed);
+        let previous_id = self
+            .last_observed_attack_target
+            .swap(attacking_id, Ordering::Relaxed);
+
+        if attacking_id == 0 || attacking_id == previous_id {
+            return;
+        }
+
+        self.attack_animation_tick.store(10, Ordering::Relaxed);
+        let entity = self.get_entity();
+        let world = entity.world.load();
+        world.send_entity_status(entity, EntityStatus::StartAttacking, None);
+        entity.play_sound(Sound::EntityIronGolemAttack);
+    }
+}
+
+impl NeutralMob for IronGolemEntity {
+    fn persistent_anger_state(&self) -> &PersistentAngerState {
+        &self.persistent_anger
+    }
 }
 
 impl Mob for IronGolemEntity {
     fn as_iron_golem(&self) -> Option<&IronGolemEntity> {
         Some(self)
     }
+    fn as_neutral(&self) -> Option<&dyn NeutralMob> {
+        Some(self)
+    }
     fn mob_write_nbt<'a>(&'a self, nbt: &'a mut NbtCompound) -> NbtFuture<'a, ()> {
         Box::pin(async move {
             nbt.put_bool("PlayerCreated", self.is_player_created());
+            self.write_persistent_anger_nbt(nbt);
         })
     }
 
@@ -133,6 +169,7 @@ impl Mob for IronGolemEntity {
             if let Some(created) = nbt.get_bool("PlayerCreated") {
                 self.set_player_created(created);
             }
+            self.read_persistent_anger_nbt(nbt).await;
         })
     }
 
@@ -142,6 +179,19 @@ impl Mob for IronGolemEntity {
 
     fn mob_tick<'a>(&'a self, _caller: &'a Arc<dyn EntityBase>) -> EntityBaseFuture<'a, ()> {
         Box::pin(async move {
+            self.update_persistent_anger(true).await;
+
+            if self.is_player_created()
+                && self
+                    .get_mob_entity()
+                    .get_target()
+                    .await
+                    .is_some_and(|target| target.get_entity().entity_type == &EntityType::PLAYER)
+            {
+                self.stop_being_angry().await;
+            }
+
+            self.observe_attack_event();
             let attack_tick = self.attack_animation_tick.load(Ordering::Relaxed);
             if attack_tick > 0 {
                 self.attack_animation_tick.fetch_sub(1, Ordering::Relaxed);

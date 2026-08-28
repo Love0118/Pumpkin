@@ -15,7 +15,6 @@ use std::{
 use bytes::Bytes;
 use deserializer::NbtReadHelper;
 use serializer::{NbtWriteHelper, NbtWriteHelperBedrock, NbtWriteHelperJava};
-use tag::NbtTag;
 use thiserror::Error;
 
 /// Compound-tag storage and construction helpers.
@@ -64,6 +63,8 @@ pub const LONG_ARRAY_ID: u8 = 0x0C;
 
 /// Maximum number of elements accepted when decoding a list or array.
 pub const MAX_ARRAY_LENGTH: usize = 512_000;
+/// Maximum encoded byte length accepted for one NBT string.
+pub const MAX_STRING_LENGTH: usize = 512_000;
 /// Maximum nesting depth allowed when decoding NBT compound or list tags.
 pub const MAX_NBT_DEPTH: usize = 512;
 
@@ -163,66 +164,64 @@ impl Nbt {
     }
 
     /// Serializes this document using the Java Edition NBT representation.
-    #[must_use]
-    pub fn write(self) -> Bytes {
+    ///
+    /// Serialization failures, including an overlong root name, are returned to
+    /// the caller instead of producing a partial byte sequence.
+    pub fn write(&self) -> Result<Bytes, Error> {
         let mut bytes = Vec::new();
-        let mut writer = NbtWriteHelperJava::new(&mut bytes);
-        if writer.write_u8(COMPOUND_ID).is_ok()
-            && NbtTag::String(self.name.into())
-                .serialize_data(&mut writer)
-                .is_ok()
-        {
-            let _ = self.root_tag.serialize_content(&mut writer);
-        }
-
-        bytes.into()
+        self.write_to_writer(&mut bytes)?;
+        Ok(bytes.into())
     }
 
     /// Serializes this document using the Bedrock network NBT representation.
-    #[must_use]
-    pub fn write_bedrock(self) -> Bytes {
+    ///
+    /// Serialization failures are returned to the caller instead of producing
+    /// a partial byte sequence.
+    pub fn write_bedrock(&self) -> Result<Bytes, Error> {
         let mut bytes = Vec::new();
-        let mut writer = NbtWriteHelperBedrock::new(&mut bytes);
-        if writer.write_u8(COMPOUND_ID).is_ok()
-            && NbtTag::String(self.name.into())
-                .serialize_data(&mut writer)
-                .is_ok()
-        {
-            let _ = self.root_tag.serialize_content(&mut writer);
-        }
-
-        bytes.into()
+        self.write_to_writer_bedrock(&mut bytes)?;
+        Ok(bytes.into())
     }
 
-    /// Writes this document in the Java Edition representation.
-    pub fn write_to_writer<W: Write>(self, mut writer: W) -> Result<(), io::Error> {
-        writer.write_all(&self.write())?;
-        Ok(())
+    /// Writes this document directly in the Java Edition representation.
+    pub fn write_to_writer<W: Write>(&self, writer: W) -> Result<(), Error> {
+        let mut writer = NbtWriteHelperJava::new(writer);
+        writer.write_u8(COMPOUND_ID)?;
+        writer.write_string(&self.name)?;
+        self.root_tag.serialize_content(&mut writer)
     }
 
-    /// Writes this document in the Bedrock network representation.
-    pub fn write_to_writer_bedrock<W: Write>(self, mut writer: W) -> Result<(), io::Error> {
-        writer.write_all(&self.write_bedrock())?;
-        Ok(())
+    /// Writes this document directly in the Bedrock network representation.
+    pub fn write_to_writer_bedrock<W: Write>(&self, writer: W) -> Result<(), Error> {
+        let mut writer = NbtWriteHelperBedrock::new(writer);
+        writer.write_u8(COMPOUND_ID)?;
+        writer.write_string(&self.name)?;
+        self.root_tag.serialize_content(&mut writer)
+    }
+
+    /// Writes a borrowed compound as an unnamed Bedrock network NBT document.
+    pub fn write_compound_to_writer_bedrock<W: Write>(
+        compound: &NbtCompound,
+        writer: W,
+    ) -> Result<(), Error> {
+        let mut writer = NbtWriteHelperBedrock::new(writer);
+        writer.write_u8(COMPOUND_ID)?;
+        writer.write_string("")?;
+        compound.serialize_content(&mut writer)
     }
 
     /// Serializes this document without the root compound's name.
-    #[must_use]
-    pub fn write_unnamed(self) -> Bytes {
+    pub fn write_unnamed(&self) -> Result<Bytes, Error> {
         let mut bytes = Vec::new();
-        let mut writer = NbtWriteHelperJava::new(&mut bytes);
-
-        if writer.write_u8(COMPOUND_ID).is_ok() {
-            let _ = self.root_tag.serialize_content(&mut writer);
-        }
-
-        bytes.into()
+        self.write_unnamed_to_writer(&mut bytes)?;
+        Ok(bytes.into())
     }
 
-    /// Writes this document without the root compound's name.
-    pub fn write_unnamed_to_writer<W: Write>(self, mut writer: W) -> Result<(), io::Error> {
-        writer.write_all(&self.write_unnamed())?;
-        Ok(())
+    /// Writes this document directly without the root compound's name.
+    pub fn write_unnamed_to_writer<W: Write>(&self, writer: W) -> Result<(), Error> {
+        let mut writer = NbtWriteHelperJava::new(writer);
+        writer.write_u8(COMPOUND_ID)?;
+        self.root_tag.serialize_content(&mut writer)
     }
 }
 
@@ -253,5 +252,207 @@ where
 impl AsMut<NbtCompound> for Nbt {
     fn as_mut(&mut self) -> &mut NbtCompound {
         &mut self.root_tag
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{self, Write},
+        sync::Arc,
+    };
+
+    use super::{COMPOUND_ID, END_ID, Error, Nbt, NbtCompound};
+    use crate::serializer::{NbtWriteHelper, NbtWriteHelperJava};
+    use crate::tag::NbtTag;
+
+    struct FailingWriter {
+        remaining: usize,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::other("injected write failure"));
+            }
+
+            let written = bytes.len().min(self.remaining);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn empty_documents_have_expected_encodings() {
+        let java = Nbt::from(NbtCompound::new())
+            .write()
+            .expect("empty Java NBT should serialize");
+        let unnamed = Nbt::from(NbtCompound::new())
+            .write_unnamed()
+            .expect("empty unnamed NBT should serialize");
+        let bedrock = Nbt::from(NbtCompound::new())
+            .write_bedrock()
+            .expect("empty Bedrock NBT should serialize");
+
+        assert_eq!(java.as_ref(), [0x0A, 0x00, 0x00, 0x00]);
+        assert_eq!(unnamed.as_ref(), [0x0A, 0x00]);
+        assert_eq!(bedrock.as_ref(), [0x0A, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn direct_writers_match_buffer_convenience_methods() {
+        let mut compound = NbtCompound::new();
+        compound.put_int("answer", 42);
+        compound.put_string("name", "Pumpkin".to_owned());
+        let nbt = Nbt::new("root".to_owned(), compound);
+
+        let expected_java = nbt.clone().write().expect("Java NBT should serialize");
+        let mut direct_java = Vec::new();
+        nbt.clone()
+            .write_to_writer(&mut direct_java)
+            .expect("direct Java NBT should serialize");
+        assert_eq!(expected_java.as_ref(), direct_java);
+
+        let expected_bedrock = nbt
+            .clone()
+            .write_bedrock()
+            .expect("Bedrock NBT should serialize");
+        let mut direct_bedrock = Vec::new();
+        nbt.clone()
+            .write_to_writer_bedrock(&mut direct_bedrock)
+            .expect("direct Bedrock NBT should serialize");
+        assert_eq!(expected_bedrock.as_ref(), direct_bedrock);
+
+        let expected_unnamed = nbt
+            .clone()
+            .write_unnamed()
+            .expect("unnamed NBT should serialize");
+        let mut direct_unnamed = Vec::new();
+        nbt.write_unnamed_to_writer(&mut direct_unnamed)
+            .expect("direct unnamed NBT should serialize");
+        assert_eq!(expected_unnamed.as_ref(), direct_unnamed);
+    }
+
+    #[test]
+    fn borrowed_bedrock_compound_writer_matches_owned_document() {
+        let mut compound = NbtCompound::new();
+        compound.put_int("answer", 42);
+        compound.put_string("name", "Pumpkin".to_owned());
+        let expected = Nbt::from(compound.clone()).write_bedrock().unwrap();
+
+        let mut actual = Vec::new();
+        Nbt::write_compound_to_writer_bedrock(&compound, &mut actual).unwrap();
+
+        assert_eq!(actual, expected.as_ref());
+        assert_eq!(compound.get_int("answer"), Some(42));
+    }
+
+    #[test]
+    fn direct_writer_propagates_io_failure() {
+        let mut compound = NbtCompound::new();
+        compound.put_string("value", "payload".to_owned());
+
+        let error = Nbt::from(compound)
+            .write_to_writer(FailingWriter { remaining: 3 })
+            .expect_err("injected writer failure must be returned");
+
+        assert!(matches!(error, Error::Incomplete(_)));
+    }
+
+    #[test]
+    fn overlong_java_root_name_is_an_error() {
+        let error = Nbt::new("x".repeat(u16::MAX as usize + 1), NbtCompound::new())
+            .write()
+            .expect_err("overlong Java root name must not yield partial bytes");
+
+        assert!(matches!(error, Error::LargeLength(_)));
+    }
+
+    #[test]
+    fn borrowed_compound_list_matches_owned_list_encoding() {
+        let mut pig = NbtCompound::new();
+        pig.put_string("id", "minecraft:pig".to_owned());
+        let mut wolf = NbtCompound::new();
+        wolf.put_string("id", "minecraft:wolf".to_owned());
+        let entities = vec![pig, wolf];
+
+        let mut owned_root = NbtCompound::new();
+        owned_root.put_list(
+            "Entities",
+            entities.iter().cloned().map(NbtTag::Compound).collect(),
+        );
+        let expected = Nbt::from(owned_root).write().unwrap();
+
+        let mut actual = Vec::new();
+        let mut writer = NbtWriteHelperJava::new(&mut actual);
+        writer.write_u8(COMPOUND_ID).unwrap();
+        writer.write_string("").unwrap();
+        NbtCompound::serialize_compound_list_entry("Entities", &entities, &mut writer).unwrap();
+        writer.write_u8(END_ID).unwrap();
+
+        assert_eq!(actual, expected.as_ref());
+        assert_eq!(entities[0].get_string("id"), Some("minecraft:pig"));
+    }
+
+    #[test]
+    fn cloned_string_tags_share_their_payload() {
+        let original = NbtTag::String(Arc::from("minecraft:pig"));
+        let cloned = original.clone();
+        let (NbtTag::String(original), NbtTag::String(cloned)) = (original, cloned) else {
+            panic!("both tags should remain strings");
+        };
+
+        assert!(Arc::ptr_eq(&original, &cloned));
+    }
+
+    #[test]
+    fn compound_bytes_are_deterministic_across_insertion_order() {
+        let mut first_nested = NbtCompound::new();
+        first_nested.put_int("z", 3);
+        first_nested.put_int("a", 1);
+        let mut first = NbtCompound::new();
+        first.put_string("name", "Pumpkin");
+        first.put_compound("nested", first_nested);
+
+        let mut second_nested = NbtCompound::new();
+        second_nested.put_int("a", 1);
+        second_nested.put_int("z", 3);
+        let mut second = NbtCompound::new();
+        second.put_compound("nested", second_nested);
+        second.put_string("name", "Pumpkin");
+
+        assert_eq!(
+            Nbt::from(first).write().unwrap(),
+            Nbt::from(second).write().unwrap()
+        );
+    }
+
+    #[test]
+    fn bedrock_root_name_respects_the_shared_string_budget() {
+        let mut bytes = vec![COMPOUND_ID];
+        let mut length = (super::MAX_STRING_LENGTH as u32) + 1;
+        loop {
+            let mut byte = (length & 0x7f) as u8;
+            length >>= 7;
+            if length != 0 {
+                byte |= 0x80;
+            }
+            bytes.push(byte);
+            if length == 0 {
+                break;
+            }
+        }
+        let mut reader =
+            crate::deserializer::NbtReadHelperBedrock::new(std::io::Cursor::new(bytes));
+
+        let error = Nbt::read(&mut reader).expect_err("oversized Bedrock string must fail closed");
+
+        assert!(
+            matches!(error, Error::LargeLength(length) if length == super::MAX_STRING_LENGTH + 1)
+        );
     }
 }

@@ -62,7 +62,7 @@ impl BlockEntity for LecternBlockEntity {
         nbt: &'a mut NbtCompound,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let book = self.book.lock().await;
+            let book = self.book.lock().await.clone();
             if !book.is_empty() {
                 let mut book_nbt = NbtCompound::default();
                 book.write_item_stack(&mut book_nbt);
@@ -161,6 +161,10 @@ impl Inventory for LecternBlockEntity {
 
     fn get_stack(&self, _slot: usize) -> InventoryFuture<'_, ItemStack> {
         Box::pin(async move { self.book.lock().await.clone() })
+    }
+
+    fn snapshot_stacks(&self) -> InventoryFuture<'_, Vec<ItemStack>> {
+        Box::pin(async move { vec![self.book.lock().await.clone()] })
     }
 
     fn remove_stack(&self, _slot: usize) -> InventoryFuture<'_, ItemStack> {

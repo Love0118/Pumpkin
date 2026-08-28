@@ -4,8 +4,8 @@ use std::sync::atomic::AtomicBool;
 use crate::entity::projectile::ProjectileHit;
 use crate::{
     entity::{
-        Entity, EntityBase, EntityBaseFuture, EntityType, mob::endermite::EndermiteEntity,
-        projectile::ThrownItemEntity,
+        DamageContext, Entity, EntityBase, EntityBaseFuture, EntityType,
+        mob::endermite::EndermiteEntity, projectile::ThrownItemEntity,
     },
     server::Server,
 };
@@ -89,11 +89,10 @@ impl EntityBase for EnderPearlEntity {
                 hit_entity
                     .damage_with_context(
                         victim_ref,
-                        0.0,
-                        DamageType::THROWN,
-                        Some(*hit_pos),
-                        Some(owner.get_entity()),
-                        Some(victim_ref),
+                        DamageContext::new(0.0, DamageType::THROWN)
+                            .with_position(*hit_pos)
+                            .with_direct_entity(self)
+                            .with_causing_entity(owner.as_ref()),
                     )
                     .await;
             }
