@@ -253,6 +253,27 @@ impl ClientPlatform {
         }
     }
 
+    pub fn try_enqueue_remove_entity(&self, entity_id: i32) {
+        match self {
+            Self::Java(java) => {
+                let entity_ids = [entity_id.into()];
+                let packet =
+                    pumpkin_protocol::java::client::play::CRemoveEntities::new(&entity_ids);
+                if let Ok(data) = java.serialize_packet(&packet) {
+                    java.try_enqueue_packet(data);
+                }
+            }
+            Self::Bedrock(bedrock) => {
+                let packet = pumpkin_protocol::bedrock::client::CRemoveActor::new(
+                    pumpkin_protocol::codec::var_long::VarLong(i64::from(entity_id)),
+                );
+                if let Ok(data) = bedrock.serialize_packet(&packet) {
+                    bedrock.try_enqueue_packet(data);
+                }
+            }
+        }
+    }
+
     pub fn try_enqueue_spawn_packet(&self, entity: &Arc<dyn crate::entity::EntityBase>) {
         match self {
             Self::Java(java) => {
@@ -268,6 +289,18 @@ impl ClientPlatform {
                     let packet = ent.create_spawn_packet();
                     if let Ok(data) = java.serialize_packet(&packet) {
                         java.try_enqueue_packet(data);
+                    }
+                }
+                if let Some(metadata) = ent.metadata_state.java_snapshot(version) {
+                    let packet = pumpkin_protocol::java::client::play::CSetEntityMetadata::new(
+                        ent.entity_id.into(),
+                        metadata,
+                    );
+                    if let Ok(data) = java.serialize_packet(&packet) {
+                        java.try_enqueue_state_packet(
+                            StatePacketKind::Metadata(ent.entity_id),
+                            data,
+                        );
                     }
                 }
             }

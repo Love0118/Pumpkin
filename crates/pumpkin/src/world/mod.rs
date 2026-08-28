@@ -24,6 +24,8 @@ const MAX_BLOCK_ENTITY_RESIDUAL_BYTES: usize = 256 * 1024;
 
 pub mod chunker;
 mod entity_index;
+mod entity_section_index;
+mod entity_tracker;
 pub mod explosion;
 pub mod loot;
 pub mod map;
@@ -35,6 +37,8 @@ pub mod villager_poi;
 use crate::block::RandomTickArgs;
 use crate::world::chunker::is_within_view_distance;
 use crate::world::entity_index::EntityIndex;
+use crate::world::entity_section_index::EntitySectionIndex;
+use crate::world::entity_tracker::EntityTracker;
 use crate::world::{chunker::get_view_distance, loot::LootContextParameters};
 use crate::{block::BlockEvent, entity::item::ItemEntity};
 use crate::{
@@ -270,6 +274,10 @@ pub struct World {
     pub entities: ArcSwap<Vec<Arc<dyn EntityBase>>>,
     /// Atomic ID and UUID lookup views for all live entities, including players.
     entity_index: EntityIndex<dyn EntityBase>,
+    /// Coherent 3D section membership for movement, tracking, ticking, and removal callbacks.
+    entity_sections: EntitySectionIndex,
+    /// Per-entity player pairing membership. Only transitions emit add/remove packets.
+    entity_tracker: EntityTracker,
     /// The world's scoreboard, used for tracking scores, objectives, and display information.
     pub scoreboard: Mutex<Scoreboard>,
     /// The world's worldborder, defining the playable area and controlling its expansion or contraction.
@@ -422,6 +430,8 @@ impl World {
             players: ArcSwap::new(Arc::new(Vec::new())),
             entities: ArcSwap::new(Arc::new(Vec::new())),
             entity_index: EntityIndex::default(),
+            entity_sections: EntitySectionIndex::default(),
+            entity_tracker: EntityTracker::default(),
             scoreboard: Mutex::new(Scoreboard::default()),
             worldborder: Mutex::new(Worldborder::new(0.0, 0.0, 5.999_996_8E7, 0, 5, 300)),
             level_time: Mutex::new(LevelTime::new()),
@@ -3783,7 +3793,10 @@ impl World {
             .await;
 
         player.send_active_effects().await;
-        player.breath_manager.send_air_supply(player);
+        player
+            .living_entity
+            .breath_manager
+            .send_air_supply(&player.living_entity.entity);
         self.send_player_equipment(player).await;
 
         if let crate::net::ClientPlatform::Java(java_client) = player.client.as_ref()
@@ -4428,8 +4441,12 @@ impl World {
                             continue;
                         }
 
-                        player.client.enqueue_spawn_packet(&entity).await;
                         entity.init_data_tracker().await;
+                        entity
+                            .get_entity()
+                            .metadata_initialized
+                            .store(true, Ordering::Release);
+                        world.update_entity_pairing_for_player(&entity, &player);
                         player.try_restore_vehicle(&entity).await;
                     }
                 } else {
@@ -4439,7 +4456,7 @@ impl World {
                     for entity in world.entities.load().iter() {
                         let base_entity = entity.get_entity();
                         if base_entity.chunk_pos.load() == position {
-                            player.client.enqueue_spawn_packet(entity).await;
+                            world.update_entity_pairing_for_player(entity, &player);
                             player.try_restore_vehicle(entity).await;
                         }
                     }
@@ -4769,6 +4786,17 @@ impl World {
         self.entity_index
             .insert(base_entity.entity_id, base_entity.entity_uuid, &entity)
             .map_err(|error| error.to_string())?;
+        if !self
+            .entity_sections
+            .insert(base_entity.entity_uuid, base_entity.block_pos.load())
+        {
+            self.entity_index
+                .remove(base_entity.entity_id, base_entity.entity_uuid);
+            return Err(format!(
+                "duplicate entity section membership for {}",
+                base_entity.entity_uuid
+            ));
+        }
         base_entity.removal_reason.store(None);
         base_entity.removed.store(false, Ordering::Release);
 
@@ -4777,6 +4805,9 @@ impl World {
             new_list.push(player.clone());
             new_list
         });
+        for tracked_entity in self.entities.load().iter() {
+            self.update_entity_pairing_for_player(tracked_entity, player);
+        }
         Ok(())
     }
 
@@ -4833,6 +4864,9 @@ impl World {
             let base_entity = player.get_entity();
             base_entity.removal_reason.store(Some(reason));
             base_entity.removed.store(true, Ordering::Release);
+            self.entity_tracker.remove_player(base_entity.entity_uuid);
+            self.entity_tracker.remove_entity(base_entity.entity_uuid);
+            self.entity_sections.remove(base_entity.entity_uuid);
             self.entity_index.remove(entity_id, base_entity.entity_uuid);
 
             let bedrock_remove_player = CPlayerList {
@@ -4912,23 +4946,50 @@ impl World {
             return false;
         }
 
-        self.broadcast_entity_spawn(&entity);
+        entity
+            .get_entity()
+            .metadata_initialized
+            .store(false, Ordering::Release);
         entity.init_data_tracker().await;
+        self.broadcast_entity_spawn(&entity);
         true
     }
 
     pub fn broadcast_entity_spawn(&self, entity: &Arc<dyn EntityBase>) {
         let base_entity = entity.get_entity();
-        let chunk_pos = base_entity.chunk_pos.load();
+        base_entity
+            .metadata_initialized
+            .store(true, Ordering::Release);
+        self.refresh_entity_pairing(entity);
+    }
 
-        let players = self.players.load();
-        for player in players.iter() {
-            let center = player.get_entity().chunk_pos.load();
-            let view_distance = get_view_distance(player).get() as i32;
+    fn update_entity_pairing_for_player(&self, entity: &Arc<dyn EntityBase>, player: &Arc<Player>) {
+        let base_entity = entity.get_entity();
+        if base_entity.entity_uuid == player.get_entity().entity_uuid {
+            return;
+        }
+        let should_track = entity_tracker::should_track(
+            base_entity.pos.load(),
+            player.get_entity().pos.load(),
+            base_entity.entity_type.client_tracking_range_blocks(),
+            std::num::NonZeroI32::from(get_view_distance(player)),
+        );
+        match self.entity_tracker.transition(
+            base_entity.entity_uuid,
+            player.get_entity().entity_uuid,
+            should_track,
+        ) {
+            Some(true) => player.client.try_enqueue_spawn_packet(entity),
+            Some(false) => player
+                .client
+                .try_enqueue_remove_entity(base_entity.entity_id),
+            None => {}
+        }
+    }
 
-            if is_within_view_distance(chunk_pos, center, view_distance) {
-                player.client.try_enqueue_spawn_packet(entity);
-            }
+    fn refresh_entity_pairing(&self, entity: &Arc<dyn EntityBase>) {
+        for player in self.players.load().iter() {
+            self.update_entity_pairing_for_player(entity, player);
         }
     }
 
@@ -4943,6 +5004,19 @@ impl World {
                 entity_uuid = %base_entity.entity_uuid,
                 %error,
                 "Rejected duplicate live entity"
+            );
+            return false;
+        }
+        if !self
+            .entity_sections
+            .insert(base_entity.entity_uuid, base_entity.block_pos.load())
+        {
+            self.entity_index
+                .remove(base_entity.entity_id, base_entity.entity_uuid);
+            warn!(
+                entity_id = base_entity.entity_id,
+                entity_uuid = %base_entity.entity_uuid,
+                "Rejected duplicate entity section membership"
             );
             return false;
         }
@@ -4975,6 +5049,15 @@ impl World {
         base_entity.removed.store(true, Ordering::Release);
 
         self.spawn_state.load().remove_entity(self, entity);
+        let previous_viewers = self.entity_tracker.remove_entity(base_entity.entity_uuid);
+        for player_uuid in previous_viewers {
+            if let Some(player) = self.get_player_by_uuid(player_uuid) {
+                player
+                    .client
+                    .try_enqueue_remove_entity(base_entity.entity_id);
+            }
+        }
+        self.entity_sections.remove(base_entity.entity_uuid);
         self.entity_index
             .remove(base_entity.entity_id, base_entity.entity_uuid);
         self.entities.rcu(|current_entities| {
@@ -4982,13 +5065,6 @@ impl World {
             new_entities.retain(|e| e.get_entity().entity_uuid != base_entity.entity_uuid);
             new_entities
         });
-
-        let chunk_pos = base_entity.chunk_pos.load();
-        self.broadcast_to_chunk_editioned_sync(
-            chunk_pos,
-            &CRemoveEntities::new(&[base_entity.entity_id.into()]),
-            &CRemoveActor::new(VarLong(base_entity.entity_id as i64)),
-        );
     }
 
     pub async fn remove_entities_in_chunks(
@@ -5051,6 +5127,8 @@ impl World {
             }
             base_entity.removed.store(true, Ordering::Release);
             self.spawn_state.load().remove_entity(self, entity.as_ref());
+            self.entity_tracker.remove_entity(base_entity.entity_uuid);
+            self.entity_sections.remove(base_entity.entity_uuid);
             self.entity_index
                 .remove(base_entity.entity_id, base_entity.entity_uuid);
         }
@@ -5062,6 +5140,19 @@ impl World {
                     self.custom_block_entity_data.remove(position);
                     self.block_entity_residual_data.remove(position);
                 }
+            }
+        }
+    }
+
+    pub(crate) fn on_entity_section_change(&self, uuid: Uuid, position: BlockPos) {
+        self.entity_sections.move_entity(uuid, position);
+        if let Some(entity) = self.entity_index.get_by_uuid(uuid) {
+            if let Some(player) = self.get_player_by_uuid(uuid) {
+                for tracked_entity in self.entities.load().iter() {
+                    self.update_entity_pairing_for_player(tracked_entity, &player);
+                }
+            } else {
+                self.refresh_entity_pairing(&entity);
             }
         }
     }

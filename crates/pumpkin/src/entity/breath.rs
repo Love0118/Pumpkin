@@ -1,5 +1,5 @@
-use crate::entity::EntityBase;
 use crate::entity::player::Player;
+use crate::entity::{Entity, EntityBase};
 use pumpkin_data::damage::DamageType;
 use pumpkin_data::effect::StatusEffect;
 use pumpkin_data::tag;
@@ -38,7 +38,7 @@ impl BreathManager {
         if matches!(mode, GameMode::Creative | GameMode::Spectator) {
             if self.air_supply.load(Ordering::Relaxed) != MAX_AIR {
                 self.air_supply.store(MAX_AIR, Ordering::Relaxed);
-                self.send_air_supply(player);
+                self.send_air_supply(player.get_entity());
             }
             self.drowning_tick.store(0, Ordering::Relaxed);
             return;
@@ -54,7 +54,7 @@ impl BreathManager {
             .await
         {
             if self.air_supply.swap(MAX_AIR, Ordering::Relaxed) != MAX_AIR {
-                self.send_air_supply(player);
+                self.send_air_supply(player.get_entity());
             }
             self.drowning_tick.store(0, Ordering::Relaxed);
             return;
@@ -84,7 +84,7 @@ impl BreathManager {
                         return;
                     }
                 }
-                self.send_air_supply(player);
+                self.send_air_supply(player.get_entity());
             }
 
             if new_air <= 0 {
@@ -103,7 +103,7 @@ impl BreathManager {
             let new_air = (prev + AIR_RECOVERY_RATE).min(MAX_AIR);
             if new_air != prev {
                 self.air_supply.store(new_air, Ordering::Relaxed);
-                self.send_air_supply(player);
+                self.send_air_supply(player.get_entity());
             }
             self.drowning_tick.store(0, Ordering::Relaxed);
         }
@@ -162,8 +162,14 @@ impl BreathManager {
         surface_y > eye_y
     }
 
-    pub fn send_air_supply(&self, player: &Player) {
-        let air = self.air_supply.load(Ordering::Relaxed).clamp(0, MAX_AIR);
+    pub fn set_air_supply(&self, entity: &Entity, air: i32) {
+        if self.air_supply.swap(air, Ordering::Relaxed) != air {
+            self.send_air_supply(entity);
+        }
+    }
+
+    pub fn send_air_supply(&self, entity: &Entity) {
+        let air = self.air_supply.load(Ordering::Relaxed);
 
         let mut bedrock_meta =
             pumpkin_protocol::bedrock::client::set_actor_data::EntityMetadata::new();
@@ -172,7 +178,7 @@ impl BreathManager {
             pumpkin_protocol::bedrock::client::set_actor_data::MetadataValue::Short(air as i16),
         );
 
-        player.get_entity().send_meta_data(
+        entity.send_meta_data(
             &[Metadata::new(
                 pumpkin_data::tracked_data::entity::DATA_AIR_SUPPLY_ID,
                 VarInt(air),
@@ -181,9 +187,8 @@ impl BreathManager {
         );
     }
 
-    pub fn reset(&self, player: &Player) {
-        self.air_supply.store(MAX_AIR, Ordering::Relaxed);
-        self.send_air_supply(player);
+    pub fn reset(&self, entity: &Entity) {
+        self.set_air_supply(entity, MAX_AIR);
         self.drowning_tick.store(0, Ordering::Relaxed);
     }
 }

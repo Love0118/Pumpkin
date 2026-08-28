@@ -9,6 +9,7 @@ use crate::entity::{
         try_find_water::TryFindWaterGoal, wander_around::WanderAroundGoal,
     },
     mob::{Mob, MobEntity},
+    passive::water_animal::WaterAnimal,
 };
 
 pub struct TadpoleEntity {
@@ -46,7 +47,13 @@ impl TadpoleEntity {
     }
 }
 
+impl WaterAnimal for TadpoleEntity {}
+
 impl Mob for TadpoleEntity {
+    fn as_water_animal(&self) -> Option<&dyn WaterAnimal> {
+        Some(self)
+    }
+
     fn get_mob_entity(&self) -> &MobEntity {
         &self.mob_entity
     }

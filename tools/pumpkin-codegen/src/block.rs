@@ -1539,7 +1539,7 @@ fn get_be_data_from_nbt<R: Read + Seek>(
                         }
                     }
                     pumpkin_nbt::tag::NbtTag::Int(v) => v.to_string(),
-                    pumpkin_nbt::tag::NbtTag::String(v) => v.into(),
+                    pumpkin_nbt::tag::NbtTag::String(v) => v.to_string(),
                     _ => {
                         panic!("Unexpected type for {}. Value: {val:?}", key);
                     }

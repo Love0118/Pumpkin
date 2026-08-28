@@ -177,7 +177,10 @@ impl BlockBehaviour for BubbleColumnBlock {
             ));
 
             if let Some(player) = args.entity.get_player() {
-                player.breath_manager.reset(player);
+                player
+                    .living_entity
+                    .breath_manager
+                    .reset(&player.living_entity.entity);
             }
         })
     }

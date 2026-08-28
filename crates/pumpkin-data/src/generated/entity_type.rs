@@ -25,6 +25,9 @@ pub struct EntityType {
     pub dimension: [f32; 2],
     pub eye_height: f32,
     pub spawn_restriction: SpawnRestriction,
+    pub client_tracking_range: i32,
+    pub update_interval: i32,
+    pub track_deltas: bool,
     pub resource_name: &'static str,
 }
 impl Hash for EntityType {
@@ -167,6 +170,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "acacia_boat",
     };
     pub const ACACIA_CHEST_BOAT: EntityType = EntityType {
@@ -189,6 +195,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "acacia_chest_boat",
     };
     pub const ALLAY: EntityType = EntityType {
@@ -245,6 +254,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 2i32,
+        track_deltas: true,
         resource_name: "allay",
     };
     pub const AREA_EFFECT_CLOUD: EntityType = EntityType {
@@ -267,6 +279,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 2147483647i32,
+        track_deltas: true,
         resource_name: "area_effect_cloud",
     };
     pub const ARMADILLO: EntityType = EntityType {
@@ -322,6 +337,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "armadillo",
     };
     pub const ARMOR_STAND: EntityType = EntityType {
@@ -375,6 +393,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "armor_stand",
     };
     pub const ARROW: EntityType = EntityType {
@@ -397,6 +418,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 20i32,
+        track_deltas: true,
         resource_name: "arrow",
     };
     pub const AXOLOTL: EntityType = EntityType {
@@ -453,6 +477,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "axolotl",
     };
     pub const BAMBOO_CHEST_RAFT: EntityType = EntityType {
@@ -475,6 +502,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "bamboo_chest_raft",
     };
     pub const BAMBOO_RAFT: EntityType = EntityType {
@@ -497,6 +527,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "bamboo_raft",
     };
     pub const BAT: EntityType = EntityType {
@@ -551,6 +584,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 5i32,
+        update_interval: 3i32,
+        track_deltas: false,
         resource_name: "bat",
     };
     pub const BEE: EntityType = EntityType {
@@ -608,6 +644,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "bee",
     };
     pub const BIRCH_BOAT: EntityType = EntityType {
@@ -630,6 +669,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "birch_boat",
     };
     pub const BIRCH_CHEST_BOAT: EntityType = EntityType {
@@ -652,6 +694,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "birch_chest_boat",
     };
     pub const BLAZE: EntityType = EntityType {
@@ -743,6 +788,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "blaze",
     };
     pub const BLOCK_DISPLAY: EntityType = EntityType {
@@ -765,6 +813,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 1i32,
+        track_deltas: true,
         resource_name: "block_display",
     };
     pub const BOGGED: EntityType = EntityType {
@@ -938,6 +989,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "bogged",
     };
     pub const BREEZE: EntityType = EntityType {
@@ -1029,6 +1083,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "breeze",
     };
     pub const BREEZE_WIND_CHARGE: EntityType = EntityType {
@@ -1051,6 +1108,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "breeze_wind_charge",
     };
     pub const CAMEL: EntityType = EntityType {
@@ -1106,6 +1166,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "camel",
     };
     pub const CAMEL_HUSK: EntityType = EntityType {
@@ -1197,6 +1260,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "camel_husk",
     };
     pub const CAT: EntityType = EntityType {
@@ -1276,6 +1342,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "cat",
     };
     pub const CAVE_SPIDER: EntityType = EntityType {
@@ -1406,6 +1475,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "cave_spider",
     };
     pub const CHERRY_BOAT: EntityType = EntityType {
@@ -1428,6 +1500,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "cherry_boat",
     };
     pub const CHERRY_CHEST_BOAT: EntityType = EntityType {
@@ -1450,6 +1525,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "cherry_chest_boat",
     };
     pub const CHEST_MINECART: EntityType = EntityType {
@@ -1472,6 +1550,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "chest_minecart",
     };
     pub const CHICKEN: EntityType = EntityType {
@@ -1609,6 +1690,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "chicken",
     };
     pub const COD: EntityType = EntityType {
@@ -1710,6 +1794,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "cod",
     };
     pub const COMMAND_BLOCK_MINECART: EntityType = EntityType {
@@ -1732,6 +1819,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "command_block_minecart",
     };
     pub const COPPER_GOLEM: EntityType = EntityType {
@@ -1822,6 +1912,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "copper_golem",
     };
     pub const COW: EntityType = EntityType {
@@ -1969,6 +2062,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "cow",
     };
     pub const CREAKING: EntityType = EntityType {
@@ -2024,6 +2120,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "creaking",
     };
     pub const CREEPER: EntityType = EntityType {
@@ -2138,6 +2237,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "creeper",
     };
     pub const DARK_OAK_BOAT: EntityType = EntityType {
@@ -2160,6 +2262,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "dark_oak_boat",
     };
     pub const DARK_OAK_CHEST_BOAT: EntityType = EntityType {
@@ -2182,6 +2287,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "dark_oak_chest_boat",
     };
     pub const DOLPHIN: EntityType = EntityType {
@@ -2290,6 +2398,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 5i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "dolphin",
     };
     pub const DONKEY: EntityType = EntityType {
@@ -2381,6 +2492,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "donkey",
     };
     pub const DRAGON_FIREBALL: EntityType = EntityType {
@@ -2403,6 +2517,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "dragon_fireball",
     };
     pub const DROWNED: EntityType = EntityType {
@@ -2518,6 +2635,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "drowned",
     };
     pub const EGG: EntityType = EntityType {
@@ -2540,6 +2660,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "egg",
     };
     pub const ELDER_GUARDIAN: EntityType = EntityType {
@@ -2783,6 +2906,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "elder_guardian",
     };
     pub const END_CRYSTAL: EntityType = EntityType {
@@ -2805,6 +2931,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 16i32,
+        update_interval: 2147483647i32,
+        track_deltas: false,
         resource_name: "end_crystal",
     };
     pub const ENDER_DRAGON: EntityType = EntityType {
@@ -2859,6 +2988,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "ender_dragon",
     };
     pub const ENDER_PEARL: EntityType = EntityType {
@@ -2881,6 +3013,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "ender_pearl",
     };
     pub const ENDERMAN: EntityType = EntityType {
@@ -2972,6 +3107,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "enderman",
     };
     pub const ENDERMITE: EntityType = EntityType {
@@ -3027,6 +3165,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "endermite",
     };
     pub const EVOKER: EntityType = EntityType {
@@ -3135,6 +3276,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "evoker",
     };
     pub const EVOKER_FANGS: EntityType = EntityType {
@@ -3157,6 +3301,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 6i32,
+        update_interval: 2i32,
+        track_deltas: false,
         resource_name: "evoker_fangs",
     };
     pub const EXPERIENCE_BOTTLE: EntityType = EntityType {
@@ -3179,6 +3326,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "experience_bottle",
     };
     pub const EXPERIENCE_ORB: EntityType = EntityType {
@@ -3201,6 +3351,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 6i32,
+        update_interval: 20i32,
+        track_deltas: true,
         resource_name: "experience_orb",
     };
     pub const EYE_OF_ENDER: EntityType = EntityType {
@@ -3223,6 +3376,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 4i32,
+        track_deltas: true,
         resource_name: "eye_of_ender",
     };
     pub const FALLING_BLOCK: EntityType = EntityType {
@@ -3245,6 +3401,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 20i32,
+        track_deltas: true,
         resource_name: "falling_block",
     };
     pub const FIREBALL: EntityType = EntityType {
@@ -3267,6 +3426,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "fireball",
     };
     pub const FIREWORK_ROCKET: EntityType = EntityType {
@@ -3289,6 +3451,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "firework_rocket",
     };
     pub const FISHING_BOBBER: EntityType = EntityType {
@@ -3311,6 +3476,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 5i32,
+        track_deltas: true,
         resource_name: "fishing_bobber",
     };
     pub const FOX: EntityType = EntityType {
@@ -3367,6 +3535,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "fox",
     };
     pub const FROG: EntityType = EntityType {
@@ -3423,6 +3594,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "frog",
     };
     pub const FURNACE_MINECART: EntityType = EntityType {
@@ -3445,6 +3619,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "furnace_minecart",
     };
     pub const GHAST: EntityType = EntityType {
@@ -3602,6 +3779,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "ghast",
     };
     pub const GIANT: EntityType = EntityType {
@@ -3657,6 +3837,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "giant",
     };
     pub const GLOW_ITEM_FRAME: EntityType = EntityType {
@@ -3679,6 +3862,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 2147483647i32,
+        track_deltas: false,
         resource_name: "glow_item_frame",
     };
     pub const GLOW_SQUID: EntityType = EntityType {
@@ -3769,6 +3955,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "glow_squid",
     };
     pub const GOAT: EntityType = EntityType {
@@ -3825,6 +4014,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "goat",
     };
     pub const GUARDIAN: EntityType = EntityType {
@@ -4029,6 +4221,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "guardian",
     };
     pub const HAPPY_GHAST: EntityType = EntityType {
@@ -4085,6 +4280,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "happy_ghast",
     };
     pub const HOGLIN: EntityType = EntityType {
@@ -4232,6 +4430,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "hoglin",
     };
     pub const HOPPER_MINECART: EntityType = EntityType {
@@ -4254,6 +4455,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "hopper_minecart",
     };
     pub const HORSE: EntityType = EntityType {
@@ -4345,6 +4549,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "horse",
     };
     pub const HUSK: EntityType = EntityType {
@@ -4538,6 +4745,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "husk",
     };
     pub const ILLUSIONER: EntityType = EntityType {
@@ -4593,6 +4803,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "illusioner",
     };
     pub const INTERACTION: EntityType = EntityType {
@@ -4615,6 +4828,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "interaction",
     };
     pub const IRON_GOLEM: EntityType = EntityType {
@@ -4719,6 +4935,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "iron_golem",
     };
     pub const ITEM: EntityType = EntityType {
@@ -4741,6 +4960,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 6i32,
+        update_interval: 20i32,
+        track_deltas: true,
         resource_name: "item",
     };
     pub const ITEM_DISPLAY: EntityType = EntityType {
@@ -4763,6 +4985,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 1i32,
+        track_deltas: true,
         resource_name: "item_display",
     };
     pub const ITEM_FRAME: EntityType = EntityType {
@@ -4785,6 +5010,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 2147483647i32,
+        track_deltas: false,
         resource_name: "item_frame",
     };
     pub const JUNGLE_BOAT: EntityType = EntityType {
@@ -4807,6 +5035,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "jungle_boat",
     };
     pub const JUNGLE_CHEST_BOAT: EntityType = EntityType {
@@ -4829,6 +5060,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "jungle_chest_boat",
     };
     pub const LEASH_KNOT: EntityType = EntityType {
@@ -4851,6 +5085,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 2147483647i32,
+        track_deltas: false,
         resource_name: "leash_knot",
     };
     pub const LIGHTNING_BOLT: EntityType = EntityType {
@@ -4873,6 +5110,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 16i32,
+        update_interval: 2147483647i32,
+        track_deltas: true,
         resource_name: "lightning_bolt",
     };
     pub const LINGERING_POTION: EntityType = EntityType {
@@ -4895,6 +5135,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "lingering_potion",
     };
     pub const LLAMA: EntityType = EntityType {
@@ -4986,6 +5229,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "llama",
     };
     pub const LLAMA_SPIT: EntityType = EntityType {
@@ -5008,6 +5254,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: false,
         resource_name: "llama_spit",
     };
     pub const MAGMA_CUBE: EntityType = EntityType {
@@ -5166,6 +5415,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "magma_cube",
     };
     pub const MANGROVE_BOAT: EntityType = EntityType {
@@ -5188,6 +5440,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "mangrove_boat",
     };
     pub const MANGROVE_CHEST_BOAT: EntityType = EntityType {
@@ -5210,6 +5465,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "mangrove_chest_boat",
     };
     pub const MANNEQUIN: EntityType = EntityType {
@@ -5263,6 +5521,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 32i32,
+        update_interval: 2i32,
+        track_deltas: true,
         resource_name: "mannequin",
     };
     pub const MARKER: EntityType = EntityType {
@@ -5285,6 +5546,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 0i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "marker",
     };
     pub const MINECART: EntityType = EntityType {
@@ -5307,6 +5571,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "minecart",
     };
     pub const MOOSHROOM: EntityType = EntityType {
@@ -5454,6 +5721,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "mooshroom",
     };
     pub const MULE: EntityType = EntityType {
@@ -5545,6 +5815,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "mule",
     };
     pub const NAUTILUS: EntityType = EntityType {
@@ -5621,6 +5894,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "nautilus",
     };
     pub const OAK_BOAT: EntityType = EntityType {
@@ -5643,6 +5919,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "oak_boat",
     };
     pub const OAK_CHEST_BOAT: EntityType = EntityType {
@@ -5665,6 +5944,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "oak_chest_boat",
     };
     pub const OCELOT: EntityType = EntityType {
@@ -5721,6 +6003,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlocking,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "ocelot",
     };
     pub const OMINOUS_ITEM_SPAWNER: EntityType = EntityType {
@@ -5743,6 +6028,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "ominous_item_spawner",
     };
     pub const PAINTING: EntityType = EntityType {
@@ -5765,6 +6053,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 2147483647i32,
+        track_deltas: false,
         resource_name: "painting",
     };
     pub const PALE_OAK_BOAT: EntityType = EntityType {
@@ -5787,6 +6078,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "pale_oak_boat",
     };
     pub const PALE_OAK_CHEST_BOAT: EntityType = EntityType {
@@ -5809,6 +6103,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "pale_oak_chest_boat",
     };
     pub const PANDA: EntityType = EntityType {
@@ -5885,6 +6182,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "panda",
     };
     pub const PARCHED: EntityType = EntityType {
@@ -6058,6 +6358,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "parched",
     };
     pub const PARROT: EntityType = EntityType {
@@ -6151,6 +6454,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlocking,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "parrot",
     };
     pub const PHANTOM: EntityType = EntityType {
@@ -6242,6 +6548,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "phantom",
     };
     pub const PIG: EntityType = EntityType {
@@ -6350,6 +6659,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "pig",
     };
     pub const PIGLIN: EntityType = EntityType {
@@ -6405,6 +6717,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "piglin",
     };
     pub const PIGLIN_BRUTE: EntityType = EntityType {
@@ -6460,6 +6775,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "piglin_brute",
     };
     pub const PILLAGER: EntityType = EntityType {
@@ -6546,6 +6864,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "pillager",
     };
     pub const PLAYER: EntityType = EntityType {
@@ -6572,6 +6893,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 32i32,
+        update_interval: 2i32,
+        track_deltas: false,
         resource_name: "player",
     };
     pub const POLAR_BEAR: EntityType = EntityType {
@@ -6731,6 +7055,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "polar_bear",
     };
     pub const PUFFERFISH: EntityType = EntityType {
@@ -6822,6 +7149,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "pufferfish",
     };
     pub const RABBIT: EntityType = EntityType {
@@ -6988,6 +7318,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "rabbit",
     };
     pub const RAVAGER: EntityType = EntityType {
@@ -7063,6 +7396,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "ravager",
     };
     pub const SALMON: EntityType = EntityType {
@@ -7164,6 +7500,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "salmon",
     };
     pub const SHEEP: EntityType = EntityType {
@@ -7514,6 +7853,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "sheep",
     };
     pub const SHULKER: EntityType = EntityType {
@@ -7585,6 +7927,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "shulker",
     };
     pub const SHULKER_BULLET: EntityType = EntityType {
@@ -7607,6 +7952,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "shulker_bullet",
     };
     pub const SILVERFISH: EntityType = EntityType {
@@ -7662,6 +8010,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "silverfish",
     };
     pub const SKELETON: EntityType = EntityType {
@@ -7792,6 +8143,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "skeleton",
     };
     pub const SKELETON_HORSE: EntityType = EntityType {
@@ -7883,6 +8237,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "skeleton_horse",
     };
     pub const SLIME: EntityType = EntityType {
@@ -8004,6 +8361,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "slime",
     };
     pub const SMALL_FIREBALL: EntityType = EntityType {
@@ -8026,6 +8386,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "small_fireball",
     };
     pub const SNIFFER: EntityType = EntityType {
@@ -8081,6 +8444,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "sniffer",
     };
     pub const SNOW_GOLEM: EntityType = EntityType {
@@ -8158,6 +8524,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "snow_golem",
     };
     pub const SNOWBALL: EntityType = EntityType {
@@ -8180,6 +8549,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "snowball",
     };
     pub const SPAWNER_MINECART: EntityType = EntityType {
@@ -8202,6 +8574,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "spawner_minecart",
     };
     pub const SPECTRAL_ARROW: EntityType = EntityType {
@@ -8224,6 +8599,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 20i32,
+        track_deltas: true,
         resource_name: "spectral_arrow",
     };
     pub const SPIDER: EntityType = EntityType {
@@ -8354,6 +8732,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "spider",
     };
     pub const SPLASH_POTION: EntityType = EntityType {
@@ -8376,6 +8757,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "splash_potion",
     };
     pub const SPRUCE_BOAT: EntityType = EntityType {
@@ -8398,6 +8782,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "spruce_boat",
     };
     pub const SPRUCE_CHEST_BOAT: EntityType = EntityType {
@@ -8420,6 +8807,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "spruce_chest_boat",
     };
     pub const SQUID: EntityType = EntityType {
@@ -8510,6 +8900,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "squid",
     };
     pub const STRAY: EntityType = EntityType {
@@ -8683,6 +9076,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "stray",
     };
     pub const STRIDER: EntityType = EntityType {
@@ -8774,6 +9170,9 @@ impl EntityType {
             location: SpawnLocation::InLava,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "strider",
     };
     pub const SULFUR_CUBE: EntityType = EntityType {
@@ -8829,6 +9228,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "sulfur_cube",
     };
     pub const TADPOLE: EntityType = EntityType {
@@ -8884,6 +9286,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "tadpole",
     };
     pub const TEXT_DISPLAY: EntityType = EntityType {
@@ -8906,6 +9311,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 1i32,
+        track_deltas: true,
         resource_name: "text_display",
     };
     pub const TNT: EntityType = EntityType {
@@ -8928,6 +9336,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "tnt",
     };
     pub const TNT_MINECART: EntityType = EntityType {
@@ -8950,6 +9361,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "tnt_minecart",
     };
     pub const TRADER_LLAMA: EntityType = EntityType {
@@ -9041,6 +9455,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "trader_llama",
     };
     pub const TRIDENT: EntityType = EntityType {
@@ -9063,6 +9480,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 20i32,
+        track_deltas: true,
         resource_name: "trident",
     };
     pub const TROPICAL_FISH: EntityType = EntityType {
@@ -9154,6 +9574,9 @@ impl EntityType {
             location: SpawnLocation::InWater,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "tropical_fish",
     };
     pub const TURTLE: EntityType = EntityType {
@@ -9265,6 +9688,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "turtle",
     };
     pub const VEX: EntityType = EntityType {
@@ -9320,6 +9746,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "vex",
     };
     pub const VILLAGER: EntityType = EntityType {
@@ -9374,6 +9803,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "villager",
     };
     pub const VINDICATOR: EntityType = EntityType {
@@ -9465,6 +9897,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "vindicator",
     };
     pub const WANDERING_TRADER: EntityType = EntityType {
@@ -9519,6 +9954,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "wandering_trader",
     };
     pub const WARDEN: EntityType = EntityType {
@@ -9588,6 +10026,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 16i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "warden",
     };
     pub const WIND_CHARGE: EntityType = EntityType {
@@ -9610,6 +10051,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "wind_charge",
     };
     pub const WITCH: EntityType = EntityType {
@@ -9902,6 +10346,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "witch",
     };
     pub const WITHER: EntityType = EntityType {
@@ -9958,6 +10405,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: false,
         resource_name: "wither",
     };
     pub const WITHER_SKELETON: EntityType = EntityType {
@@ -10109,6 +10559,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "wither_skeleton",
     };
     pub const WITHER_SKULL: EntityType = EntityType {
@@ -10131,6 +10584,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 4i32,
+        update_interval: 10i32,
+        track_deltas: true,
         resource_name: "wither_skull",
     };
     pub const WOLF: EntityType = EntityType {
@@ -10187,6 +10643,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "wolf",
     };
     pub const ZOGLIN: EntityType = EntityType {
@@ -10278,6 +10737,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "zoglin",
     };
     pub const ZOMBIE: EntityType = EntityType {
@@ -10494,6 +10956,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "zombie",
     };
     pub const ZOMBIE_HORSE: EntityType = EntityType {
@@ -10585,6 +11050,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "zombie_horse",
     };
     pub const ZOMBIE_NAUTILUS: EntityType = EntityType {
@@ -10677,6 +11145,9 @@ impl EntityType {
             location: SpawnLocation::Unrestricted,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 10i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "zombie_nautilus",
     };
     pub const ZOMBIE_VILLAGER: EntityType = EntityType {
@@ -10828,6 +11299,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "zombie_villager",
     };
     pub const ZOMBIFIED_PIGLIN: EntityType = EntityType {
@@ -10980,6 +11454,9 @@ impl EntityType {
             location: SpawnLocation::OnGround,
             heightmap: HeightMap::MotionBlockingNoLeaves,
         },
+        client_tracking_range: 8i32,
+        update_interval: 3i32,
+        track_deltas: true,
         resource_name: "zombified_piglin",
     };
     pub const ALL: &'static [&'static Self] = &[

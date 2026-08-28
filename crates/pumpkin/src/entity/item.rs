@@ -468,7 +468,7 @@ impl EntityBase for ItemEntity {
             self.entity.send_meta_data(
                 &[Metadata::new(
                     pumpkin_data::tracked_data::item::ITEM,
-                    &ItemStackSerializer::from(self.item_stack.lock().await.clone()),
+                    ItemStackSerializer::from(self.item_stack.lock().await.clone()),
                 )],
                 None,
             );

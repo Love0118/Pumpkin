@@ -67,12 +67,16 @@ use rand::RngExt;
 use std::sync::RwLock;
 use tokio::sync::Mutex;
 
+use super::breath::BreathManager;
+
 /// Represents a living entity within the game world.
 ///
 /// This struct encapsulates the core properties and behaviors of living entities, including players, mobs, and other creatures.
 pub struct LivingEntity {
     /// The underlying entity object, providing basic entity information and functionality.
     pub entity: Entity,
+    /// Owns the remaining-air and drowning cadence shared by every living entity.
+    pub breath_manager: BreathManager,
     /// Tracks the remaining time until the entity can regenerate health.
     pub hurt_cooldown: AtomicI32,
     /// Stores the amount of damage the entity last received.
@@ -125,6 +129,7 @@ pub struct LivingEntity {
     pub attributes: RwLock<HashMap<u8, AttributeInstance>>,
 }
 
+#[derive(Clone)]
 struct EffectParticle {
     particle_id: VarInt,
     color: i32,
@@ -155,6 +160,7 @@ const fn equipment_slot_for_hand(hand: Hand) -> EquipmentSlot {
     }
 }
 
+#[derive(Clone)]
 struct EffectParticles(Vec<EffectParticle>);
 
 impl MetadataSerializer for EffectParticles {
@@ -225,6 +231,7 @@ impl LivingEntity {
             },
             health: AtomicCell::new(max_health), // Initial health value from attributes
             entity,
+            breath_manager: BreathManager::default(),
             hurt_cooldown: AtomicI32::new(0),
             last_damage_taken: AtomicCell::new(0.0),
             last_damage_type: AtomicCell::new(None),
@@ -2110,6 +2117,13 @@ impl LivingEntity {
             nbt.put("FallDistance", NbtTag::Float(fall_distance));
             nbt.put_short("HurtTime", self.hurt_cooldown.load(Relaxed).max(0) as i16);
             nbt.put_short("DeathTime", i16::from(self.death_time.load(Relaxed)));
+            nbt.put_short(
+                "Air",
+                self.breath_manager
+                    .air_supply
+                    .load(Relaxed)
+                    .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+            );
             nbt.put_bool("FallFlying", self.entity.is_fall_flying());
             {
                 let effects = self.active_effects.lock().await;
@@ -2156,6 +2170,11 @@ impl LivingEntity {
             if let Some(death_time) = nbt.get_short("DeathTime") {
                 self.death_time.store(death_time as u8, Relaxed);
             }
+            self.breath_manager.air_supply.store(
+                nbt.get_short("Air")
+                    .map_or(super::breath::MAX_AIR, i32::from),
+                Relaxed,
+            );
             self.entity
                 .fall_flying
                 .store(nbt.get_bool("FallFlying").unwrap_or(false), Relaxed);

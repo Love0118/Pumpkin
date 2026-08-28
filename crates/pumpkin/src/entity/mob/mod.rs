@@ -743,7 +743,12 @@ impl MobEntity {
         }
     }
 
-    pub async fn mob_interact(&self, player: &Arc<Player>, item_stack: &mut ItemStack) -> bool {
+    pub async fn mob_interact(
+        &self,
+        player: &Arc<Player>,
+        item_stack: &mut ItemStack,
+        can_be_leashed: bool,
+    ) -> bool {
         let entity = &self.living_entity.entity;
 
         // If already leashed to player, right-clicking unleashes the mob
@@ -752,7 +757,7 @@ impl MobEntity {
             guard.is_some()
         };
 
-        if currently_leashed {
+        if currently_leashed && can_be_leashed {
             entity.unleash().await;
             let lead_item =
                 pumpkin_data::item_stack::ItemStack::new(1, &pumpkin_data::item::Item::LEAD);
@@ -765,8 +770,9 @@ impl MobEntity {
         }
 
         // If holding a lead, leash the mob to the player
-        if item_stack.item.registry_key == "lead"
-            || item_stack.item.registry_key == "minecraft:lead"
+        if can_be_leashed
+            && (item_stack.item.registry_key == "lead"
+                || item_stack.item.registry_key == "minecraft:lead")
         {
             let diff = entity.pos.load() - player.get_entity().pos.load();
             let dist_sq = diff.length_squared();
@@ -1014,6 +1020,22 @@ pub trait Mob: EntityBase + Send + Sync {
         None
     }
 
+    fn as_water_animal(&self) -> Option<&dyn crate::entity::passive::water_animal::WaterAnimal> {
+        None
+    }
+
+    fn mob_is_pushed_by_fluids(&self) -> bool {
+        self.as_water_animal().is_none_or(
+            crate::entity::passive::water_animal::WaterAnimal::water_animal_is_pushed_by_fluids,
+        )
+    }
+
+    fn can_be_leashed(&self) -> bool {
+        self.as_water_animal().is_none_or(
+            crate::entity::passive::water_animal::WaterAnimal::water_animal_can_be_leashed,
+        )
+    }
+
     fn as_iron_golem(&self) -> Option<&crate::entity::passive::iron_golem::IronGolemEntity> {
         None
     }
@@ -1053,7 +1075,11 @@ pub trait Mob: EntityBase + Send + Sync {
         player: &'a Arc<Player>,
         item_stack: &'a mut ItemStack,
     ) -> EntityBaseFuture<'a, bool> {
-        Box::pin(async move { self.get_mob_entity().mob_interact(player, item_stack).await })
+        Box::pin(async move {
+            self.get_mob_entity()
+                .mob_interact(player, item_stack, self.can_be_leashed())
+                .await
+        })
     }
 
     fn tame<'a>(&'a self, player: &'a Arc<Player>) -> EntityBaseFuture<'a, ()> {
@@ -1217,7 +1243,10 @@ pub trait Mob: EntityBase + Send + Sync {
     }
 
     fn get_base_experience_reward(&self) -> u32 {
-        self.get_entity().entity_type.experience_reward
+        self.as_water_animal().map_or_else(
+            || self.get_entity().entity_type.experience_reward,
+            crate::entity::passive::water_animal::WaterAnimal::water_animal_experience_reward,
+        )
     }
 
     fn mob_init_data_tracker(&self) -> EntityBaseFuture<'_, ()> {
@@ -1274,6 +1303,9 @@ impl<T: Mob + Send + 'static> EntityBase for T {
     fn init_data_tracker(&self) -> EntityBaseFuture<'_, ()> {
         Box::pin(async move {
             self.mob_init_data_tracker().await;
+            if let Some(water_animal) = self.as_water_animal() {
+                water_animal.initialize_water_animal();
+            }
             let world = self.get_mob_entity().living_entity.entity.world.load();
             crate::entity::mob::equipment::equip_mob_on_spawn(self as &dyn EntityBase, &world)
                 .await;
@@ -1394,6 +1426,10 @@ impl<T: Mob + Send + 'static> EntityBase for T {
                     .clear();
             }
 
+            if let Some(water_animal) = self.as_water_animal() {
+                water_animal.water_animal_tick(caller).await;
+            }
+
             mob_entity.living_entity.tick(caller, server).await;
             mob_entity
                 .body_rotation_control
@@ -1493,6 +1529,10 @@ impl<T: Mob + Send + 'static> EntityBase for T {
 
     fn get_entity(&self) -> &Entity {
         &self.get_mob_entity().living_entity.entity
+    }
+
+    fn is_pushed_by_fluids(&self) -> bool {
+        self.mob_is_pushed_by_fluids()
     }
 
     fn get_living_entity(&self) -> Option<&LivingEntity> {

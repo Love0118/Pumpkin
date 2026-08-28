@@ -72,7 +72,7 @@ impl EntityBase for EggEntity {
             entity.send_meta_data(
                 &[Metadata::new(
                     pumpkin_data::tracked_data::egg::ITEM_STACK,
-                    &ItemStackSerializer::from(stack.clone()),
+                    ItemStackSerializer::from(stack.clone()),
                 )],
                 None,
             );

@@ -502,7 +502,9 @@ impl Mob for WolfEntity {
             {
                 return false;
             }
-            self.get_mob_entity().mob_interact(player, item_stack).await
+            self.get_mob_entity()
+                .mob_interact(player, item_stack, self.can_be_leashed())
+                .await
         })
     }
 

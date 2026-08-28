@@ -9,7 +9,6 @@ use crate::{
     },
 };
 use arc_swap::ArcSwap;
-use bytes::BufMut;
 use crossbeam::atomic::AtomicCell;
 use living::LivingEntity;
 use player::Player;
@@ -99,6 +98,7 @@ pub mod item_steerable;
 pub mod lightning;
 pub mod living;
 pub mod marker;
+mod metadata_state;
 pub mod mob;
 pub mod passive;
 pub mod player;
@@ -607,6 +607,9 @@ pub trait EntityBase: Send + Sync + std::any::Any {
                 .and_then(mob::Mob::mob_bedrock_identifier)
                 .unwrap_or(entity.entity_type.resource_name);
             let mut metadata = entity.bedrock_metadata();
+            metadata
+                .0
+                .extend(entity.metadata_state.bedrock_snapshot().0);
             if let Some(mob) = self.get_mob()
                 && let Some(mob_metadata) = mob.mob_bedrock_spawn_metadata().await
             {
@@ -671,6 +674,12 @@ pub trait EntityBase: Send + Sync + std::any::Any {
                     if let Ok(meta_data) = client.serialize_packet(&meta_packet) {
                         client.enqueue_packet(meta_data).await;
                     }
+                }
+            }
+            if let Some(metadata) = entity.metadata_state.java_snapshot(version) {
+                let meta_packet = CSetEntityMetadata::new(entity.entity_id.into(), metadata);
+                if let Ok(meta_data) = client.serialize_packet(&meta_packet) {
+                    client.enqueue_packet(meta_data).await;
                 }
             }
         })
@@ -1364,6 +1373,10 @@ pub struct Entity {
     pub bedrock_flags: std::sync::atomic::AtomicI64,
     /// Stores more Bedrock-specific entity boolean flags (bit 0-63)
     pub bedrock_flags_two: std::sync::atomic::AtomicI64,
+    /// Authoritative Java/Bedrock metadata values used by initial and late pairing.
+    pub(crate) metadata_state: metadata_state::TrackedMetadataState,
+    /// False while initial metadata is accumulated before the spawn packet is published.
+    pub(crate) metadata_initialized: AtomicBool,
     /// If true, the entity cannot collide with anything (e.g. spectator)
     pub no_clip: AtomicBool,
     /// Multiplies movement for one tick before being reset
@@ -1472,6 +1485,8 @@ impl Entity {
             flags: std::sync::atomic::AtomicI8::new(0),
             bedrock_flags: std::sync::atomic::AtomicI64::new(0),
             bedrock_flags_two: std::sync::atomic::AtomicI64::new(0),
+            metadata_state: metadata_state::TrackedMetadataState::default(),
+            metadata_initialized: AtomicBool::new(false),
             fire_immune: AtomicBool::new(false),
             fire_ticks: AtomicI32::new(-1),
             has_visual_fire: AtomicBool::new(false),
@@ -1761,6 +1776,9 @@ impl Entity {
                         get_section_cord(new_block_pos.z),
                     ));
                 }
+                self.world
+                    .load()
+                    .on_entity_section_change(self.entity_uuid, BlockPos(new_block_pos));
             }
         }
     }
@@ -3445,11 +3463,18 @@ impl Entity {
             .play_sound(sound, SoundCategory::Neutral, &self.pos.load());
     }
 
-    pub fn send_meta_data<T: MetadataSerializer>(
-        &self,
-        meta: &[Metadata<T>],
-        bedrock_meta: Option<&EntityMetadata>,
-    ) {
+    pub fn send_meta_data<T>(&self, meta: &[Metadata<T>], bedrock_meta: Option<&EntityMetadata>)
+    where
+        T: MetadataSerializer + Clone + Send + Sync + 'static,
+    {
+        self.metadata_state.apply_java(meta);
+        if let Some(bedrock_meta) = bedrock_meta {
+            self.metadata_state.apply_bedrock(bedrock_meta);
+        }
+        if !self.metadata_initialized.load(Ordering::Acquire) {
+            return;
+        }
+
         let world = self.world.load();
         let chunk_pos = self.chunk_pos.load();
         let players = world.players.load();
@@ -3473,30 +3498,27 @@ impl Entity {
             World::collect_java_recipients_by_version(java_recipients.into_iter());
 
         for (version, recipients) in recipients_by_version {
-            let mut buf = Vec::new();
-            let mut serialization_failed = false;
-            for m in meta {
-                if let Err(serialization_error) = m.write(&mut buf, &version) {
+            match metadata_state::TrackedMetadataState::encode_java_delta(meta, version) {
+                Err(serialization_error) => {
                     error!(
                         "Failed to serialize entity {} metadata for {version:?}: {serialization_error}",
                         self.entity_id
                     );
-                    serialization_failed = true;
-                    break;
                 }
-            }
-            if serialization_failed {
-                continue;
-            }
-            buf.put_u8(255);
-            let packet = CSetEntityMetadata::new(self.entity_id.into(), buf.into());
-            if let Ok(packet_data) = JavaClient::serialize_packet_for_version(&packet, version) {
-                for recipient in recipients {
-                    recipient.try_enqueue_state_packet(
-                        crate::net::StatePacketKind::Metadata(self.entity_id),
-                        packet_data.clone(),
-                    );
+                Ok(delta) if !delta.is_empty() => {
+                    let packet = CSetEntityMetadata::new(self.entity_id.into(), delta);
+                    if let Ok(packet_data) =
+                        JavaClient::serialize_packet_for_version(&packet, version)
+                    {
+                        for recipient in recipients {
+                            recipient.try_enqueue_state_packet(
+                                crate::net::StatePacketKind::Metadata(self.entity_id),
+                                packet_data.clone(),
+                            );
+                        }
+                    }
                 }
+                Ok(_) => {}
             }
         }
 

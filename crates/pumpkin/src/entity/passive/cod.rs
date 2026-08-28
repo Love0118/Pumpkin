@@ -9,6 +9,7 @@ use crate::entity::{
         wander_around::WanderAroundGoal,
     },
     mob::{Mob, MobEntity},
+    passive::water_animal::WaterAnimal,
 };
 
 /// Represents a Cod, a common passive aquatic mob.
@@ -48,7 +49,13 @@ impl CodEntity {
     }
 }
 
+impl WaterAnimal for CodEntity {}
+
 impl Mob for CodEntity {
+    fn as_water_animal(&self) -> Option<&dyn WaterAnimal> {
+        Some(self)
+    }
+
     fn get_mob_entity(&self) -> &MobEntity {
         &self.mob_entity
     }

@@ -281,7 +281,6 @@ use crate::server::Server;
 use crate::world::{BlockBreakingProgress, World};
 use bytes::Bytes;
 
-use super::breath::BreathManager;
 use super::combat::{self, AttackType, player_attack_sound};
 use super::hunger::HungerManager;
 use super::item::ItemEntity;
@@ -705,8 +704,6 @@ pub struct Player {
     pub respawn_point: Mutex<Option<RespawnPoint>>,
     /// The player's sleep status
     pub sleeping_since: AtomicCell<Option<u8>>,
-    /// Manages the player's breath level
-    pub breath_manager: BreathManager,
     /// Manages the player's hunger level.
     pub hunger_manager: HungerManager,
     /// The ID of the currently open container (if any).
@@ -973,7 +970,6 @@ impl Player {
             gameprofile,
             client,
             awaiting_teleport: Mutex::new(None),
-            breath_manager: BreathManager::default(),
             // TODO: Load this from previous instance
             hunger_manager: HungerManager::default(),
             current_block_destroy_stage: AtomicI32::new(-1),
@@ -2498,7 +2494,7 @@ impl Player {
         self.living_entity.tick(&caller, server).await;
         // Vanilla updates pose in PlayerEntity#tick after super.tick().
         self.update_player_pose().await;
-        self.breath_manager.tick(self).await;
+        self.living_entity.breath_manager.tick(self).await;
         self.hunger_manager.tick(self).await;
         self.check_inventory_advancements().await;
         self.advancements.lock().await.flush_dirty(self, true);
@@ -4068,7 +4064,9 @@ impl Player {
         }
 
         // Reset air supply & drowning ticks on death
-        self.breath_manager.reset(self);
+        self.living_entity
+            .breath_manager
+            .reset(&self.living_entity.entity);
 
         let entities = self.world().entities.load_full();
         for entity in entities.iter() {
@@ -6051,6 +6049,7 @@ impl Player {
 
         let experience_level = self.experience_level.load(Ordering::Relaxed);
         let air_supply = self
+            .living_entity
             .breath_manager
             .air_supply
             .load(Ordering::Relaxed)
@@ -6081,6 +6080,7 @@ impl Player {
             },
             air_supply,
             drowning_tick: self
+                .living_entity
                 .breath_manager
                 .drowning_tick
                 .load(Ordering::Relaxed)
@@ -6339,12 +6339,13 @@ impl EntityBase for Player {
                 .map(i32::from)
                 .or_else(|| nbt.get_int("AirSupply"))
             {
-                self.breath_manager
+                self.living_entity
+                    .breath_manager
                     .air_supply
                     .store(air.clamp(0, super::breath::MAX_AIR), Ordering::Relaxed);
             }
             if let Some(tick) = nbt.get_int("DrowningTick") {
-                self.breath_manager.drowning_tick.store(
+                self.living_entity.breath_manager.drowning_tick.store(
                     tick.clamp(0, super::breath::DROWNING_INTERVAL - 1),
                     Ordering::Relaxed,
                 );

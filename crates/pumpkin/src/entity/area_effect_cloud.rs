@@ -13,12 +13,13 @@ type EffectEntry = (&'static StatusEffect, i32, u8, bool, bool, bool);
 use pumpkin_data::item_stack::ItemStack;
 use tokio::sync::Mutex;
 
-struct ParticleMeta<'a> {
+#[derive(Clone)]
+struct ParticleMeta {
     particle_id: pumpkin_protocol::codec::var_int::VarInt,
-    data: &'a [u8],
+    data: [u8; 4],
 }
 
-impl pumpkin_protocol::java::client::play::MetadataSerializer for ParticleMeta<'_> {
+impl pumpkin_protocol::java::client::play::MetadataSerializer for ParticleMeta {
     fn write_metadata(
         &self,
         writer: &mut impl std::io::Write,
@@ -26,7 +27,7 @@ impl pumpkin_protocol::java::client::play::MetadataSerializer for ParticleMeta<'
     ) -> Result<(), pumpkin_protocol::ser::WritingError> {
         use pumpkin_protocol::ser::NetworkWriteExt;
         writer.write_var_int(&self.particle_id)?;
-        writer.write_slice(self.data)
+        writer.write_slice(&self.data)
     }
 }
 
@@ -164,14 +165,14 @@ impl EntityBase for AreaEffectCloudEntity {
                 particle_id: pumpkin_protocol::codec::var_int::VarInt(
                     pumpkin_data::particle::Particle::EntityEffect as i32,
                 ),
-                data: &data_bytes,
+                data: data_bytes,
             };
 
             // Send initial particle and radius
             self.entity.send_meta_data(
                 &[pumpkin_protocol::java::client::play::Metadata::new(
                     pumpkin_data::tracked_data::area_effect_cloud::PARTICLE,
-                    &meta,
+                    meta,
                 )],
                 None,
             );

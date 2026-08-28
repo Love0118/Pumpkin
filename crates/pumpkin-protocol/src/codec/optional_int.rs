@@ -1,3 +1,4 @@
+#[derive(Clone, Copy)]
 pub struct OptionalInt(pub Option<i32>);
 
 impl OptionalInt {

@@ -1113,8 +1113,8 @@ impl HostEntity for PluginHostState {
 
     async fn get_remaining_air(&mut self, entity: Resource<Entity>) -> wasmtime::Result<i32> {
         let entity = entity_from_resource(self, &entity)?;
-        Ok(entity.get_player().map_or(0, |player| {
-            player
+        Ok(entity.get_living_entity().map_or(0, |living| {
+            living
                 .breath_manager
                 .air_supply
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -1127,12 +1127,12 @@ impl HostEntity for PluginHostState {
         air: i32,
     ) -> wasmtime::Result<()> {
         let entity = entity_from_resource(self, &entity)?;
-        if let Some(player) = entity.get_player() {
-            player
+        if let Some(living) = entity.get_living_entity() {
+            living
                 .breath_manager
                 .air_supply
                 .store(air, std::sync::atomic::Ordering::Relaxed);
-            player.breath_manager.send_air_supply(player);
+            living.breath_manager.send_air_supply(&living.entity);
         }
         Ok(())
     }

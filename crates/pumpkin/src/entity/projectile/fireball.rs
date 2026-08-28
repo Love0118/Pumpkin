@@ -117,7 +117,7 @@ impl FireballEntity {
         self.get_entity().send_meta_data(
             &[Metadata::new(
                 pumpkin_data::tracked_data::fireball::ITEM_STACK,
-                &ItemStackSerializer::from(new_item),
+                ItemStackSerializer::from(new_item),
             )],
             None,
         );
@@ -195,7 +195,7 @@ impl EntityBase for FireballEntity {
             entity.send_meta_data(
                 &[Metadata::new(
                     pumpkin_data::tracked_data::fireball::ITEM_STACK,
-                    &ItemStackSerializer::from(stack.clone()),
+                    ItemStackSerializer::from(stack.clone()),
                 )],
                 None,
             );

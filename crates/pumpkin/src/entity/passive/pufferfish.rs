@@ -9,6 +9,7 @@ use crate::entity::{
         wander_around::WanderAroundGoal,
     },
     mob::{Mob, MobEntity},
+    passive::water_animal::WaterAnimal,
 };
 
 /// Represents a Pufferfish, a passive aquatic mob that can inflate when threatened.
@@ -48,7 +49,13 @@ impl PufferfishEntity {
     }
 }
 
+impl WaterAnimal for PufferfishEntity {}
+
 impl Mob for PufferfishEntity {
+    fn as_water_animal(&self) -> Option<&dyn WaterAnimal> {
+        Some(self)
+    }
+
     fn get_mob_entity(&self) -> &MobEntity {
         &self.mob_entity
     }

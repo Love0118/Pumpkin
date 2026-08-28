@@ -467,7 +467,10 @@ impl Mob for CatEntity {
                         return true;
                     }
 
-                    let parent_interaction = self.mob_entity.mob_interact(player, item_stack).await;
+                    let parent_interaction = self
+                        .mob_entity
+                        .mob_interact(player, item_stack, self.can_be_leashed())
+                        .await;
                     if !parent_interaction {
                         self.set_sitting(!self.is_sitting());
                         return true;
@@ -498,7 +501,9 @@ impl Mob for CatEntity {
                 return true;
             }
 
-            self.mob_entity.mob_interact(player, item_stack).await
+            self.mob_entity
+                .mob_interact(player, item_stack, self.can_be_leashed())
+                .await
         })
     }
 }

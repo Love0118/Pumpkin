@@ -44,6 +44,14 @@ pub struct EntityType {
     pub spawn_restriction: SpawnRestriction,
 }
 
+/// Vanilla client tracking policy extracted from `EntityTypes.java`.
+#[derive(Deserialize)]
+pub struct EntityTracking {
+    pub client_tracking_range: i32,
+    pub update_interval: i32,
+    pub track_deltas: bool,
+}
+
 /// Spawn restrictions controlling where an entity is allowed to naturally spawn.
 #[derive(Deserialize)]
 pub struct SpawnRestriction {
@@ -79,13 +87,14 @@ pub enum MobCategory {
 }
 
 /// Pairs a raw entity name string with its deserialized [`EntityType`] data for token generation.
-pub struct NamedEntityType<'a>(&'a str, &'a EntityType);
+pub struct NamedEntityType<'a>(&'a str, &'a EntityType, &'a EntityTracking);
 
 impl ToTokens for NamedEntityType<'_> {
     /// Emits an `EntityType { … }` struct literal token stream for the wrapped entity.
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let name = self.0;
         let entity = self.1;
+        let tracking = self.2;
         let id = LitInt::new(&entity.id.to_string(), proc_macro2::Span::call_site());
 
         let attribute_tokens = entity
@@ -182,6 +191,9 @@ impl ToTokens for NamedEntityType<'_> {
         };
 
         let experience_reward = entity.experience_reward.unwrap_or(0);
+        let client_tracking_range = tracking.client_tracking_range;
+        let update_interval = tracking.update_interval;
+        let track_deltas = tracking.track_deltas;
 
         tokens.extend(quote! {
             EntityType {
@@ -201,6 +213,9 @@ impl ToTokens for NamedEntityType<'_> {
                 dimension: [#dimension0, #dimension1], // Correctly construct the array
                 eye_height: #eye_height,
                 spawn_restriction: #spawn_restriction,
+                client_tracking_range: #client_tracking_range,
+                update_interval: #update_interval,
+                track_deltas: #track_deltas,
                 resource_name: #name,
             }
         });
@@ -213,6 +228,14 @@ pub fn build() -> TokenStream {
     let json: BTreeMap<String, EntityType> =
         serde_json::from_str(&fs::read_to_string("../../assets/entities.json").unwrap())
             .expect("Failed to parse entities.json");
+    let tracking: BTreeMap<String, EntityTracking> =
+        serde_json::from_str(&fs::read_to_string("../../assets/entity_tracking.json").unwrap())
+            .expect("Failed to parse entity_tracking.json");
+    assert_eq!(
+        json.keys().collect::<Vec<_>>(),
+        tracking.keys().collect::<Vec<_>>(),
+        "entity tracking registry must cover every entity exactly once"
+    );
 
     let mut consts = TokenStream::new();
     let mut type_from_raw_id_arms = TokenStream::new();
@@ -224,7 +247,7 @@ pub fn build() -> TokenStream {
         let id_lit = LitInt::new(&id.to_string(), proc_macro2::Span::call_site());
         let upper_name = format_ident!("{}", name.to_uppercase());
 
-        let entity_tokens = NamedEntityType(name, entity).to_token_stream();
+        let entity_tokens = NamedEntityType(name, entity, &tracking[name]).to_token_stream();
 
         consts.extend(quote! {
             pub const #upper_name: EntityType = #entity_tokens;
@@ -270,6 +293,9 @@ pub fn build() -> TokenStream {
             pub dimension: [f32; 2],
             pub eye_height: f32,
             pub spawn_restriction: SpawnRestriction,
+            pub client_tracking_range: i32,
+            pub update_interval: i32,
+            pub track_deltas: bool,
             pub resource_name: &'static str,
         }
 

@@ -49,6 +49,12 @@ impl EntityType {
             .iter()
             .any(|disallowed| *disallowed == self)
     }
+
+    /// Vanilla stores tracking range in chunks while player-distance checks use blocks.
+    #[must_use]
+    pub const fn client_tracking_range_blocks(&self) -> i32 {
+        self.client_tracking_range.saturating_mul(16)
+    }
 }
 
 #[cfg(test)]
@@ -62,5 +68,27 @@ mod tests {
         assert!(EntityType::PIGLIN.is_allowed_in_peaceful());
         assert!(EntityType::ENDER_DRAGON.is_allowed_in_peaceful());
         assert!(EntityType::COW.is_allowed_in_peaceful());
+    }
+
+    #[test]
+    fn tracking_policy_covers_the_complete_registry() {
+        assert_eq!(EntityType::ALL.len(), 158);
+        for entity_type in EntityType::ALL {
+            assert!((0..=32).contains(&entity_type.client_tracking_range));
+            assert!(entity_type.update_interval > 0);
+        }
+    }
+
+    #[test]
+    fn tracking_policy_matches_vanilla_special_cases() {
+        assert_eq!(EntityType::COD.client_tracking_range, 4);
+        assert_eq!(EntityType::ITEM.client_tracking_range, 6);
+        assert_eq!(EntityType::ITEM.update_interval, 20);
+        assert_eq!(EntityType::PLAYER.client_tracking_range, 32);
+        assert_eq!(EntityType::PLAYER.update_interval, 2);
+        assert!(!EntityType::PLAYER.track_deltas);
+        assert!(!EntityType::WITHER.track_deltas);
+        assert!(EntityType::COD.track_deltas);
+        assert_eq!(EntityType::COD.client_tracking_range_blocks(), 64);
     }
 }

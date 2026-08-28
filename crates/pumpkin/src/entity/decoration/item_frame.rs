@@ -128,7 +128,7 @@ impl ItemFrameEntity {
         self.entity.send_meta_data(
             &[Metadata::new(
                 pumpkin_data::tracked_data::item_frame::ITEM,
-                &item_serializer,
+                item_serializer,
             )],
             None,
         );
@@ -322,7 +322,7 @@ impl EntityBase for ItemFrameEntity {
             self.entity.send_meta_data(
                 &[Metadata::new(
                     pumpkin_data::tracked_data::item_frame::ITEM,
-                    &item_serializer,
+                    item_serializer,
                 )],
                 None,
             );

@@ -175,7 +175,7 @@ impl EntityBase for EyeOfEnder {
             self.entity.send_meta_data(
                 &[Metadata::new(
                     pumpkin_data::tracked_data::eye_of_ender::ITEM_STACK,
-                    &ItemStackSerializer::from(self.item_stack.lock().await.clone()),
+                    ItemStackSerializer::from(self.item_stack.lock().await.clone()),
                 )],
                 None,
             );
